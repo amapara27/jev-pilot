@@ -1,5 +1,7 @@
+// Declares the decision-provider boundary and its user-facing errors.
 import Foundation
 
+/// Selects one candidate for a goal and desktop snapshot.
 public protocol DecisionEngine: Sendable {
   func decide(
     goal: String,
@@ -8,6 +10,7 @@ public protocol DecisionEngine: Sendable {
   ) async throws -> ActionDecision
 }
 
+/// Describes configuration, transport, and response-validation failures.
 public enum DecisionError: LocalizedError {
   case missingAPIKey
   case noCandidates

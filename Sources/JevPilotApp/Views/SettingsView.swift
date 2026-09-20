@@ -1,6 +1,8 @@
+// Provides the settings form for managing the TypeSafe API key.
 import JevPilotCore
 import SwiftUI
 
+/// Lets the user save or remove the key from macOS Keychain.
 struct SettingsView: View {
   @State private var apiKey = ""
   @State private var message = ""
@@ -33,6 +35,7 @@ struct SettingsView: View {
     }
   }
 
+  /// Saves the trimmed key and clears it from the visible form.
   private func save() {
     do {
       try keyStore.save(apiKey.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -43,6 +46,7 @@ struct SettingsView: View {
     }
   }
 
+  /// Removes the saved key and reports the result.
   private func remove() {
     do {
       try keyStore.delete()

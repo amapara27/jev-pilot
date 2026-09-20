@@ -1,4 +1,5 @@
 #!/bin/zsh
+# Builds the executable and packages it as a signed macOS app bundle.
 set -euo pipefail
 
 project_root="${0:A:h:h}"

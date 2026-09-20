@@ -1,5 +1,7 @@
+// Defines the serializable snapshot of the desktop used to choose actions.
 import Foundation
 
+/// Captures the relevant visible desktop state for one automation step.
 public struct DesktopState: Codable, Equatable, Sendable {
   public var capturedAt: Date
   public var activeApplication: ApplicationState?
@@ -34,6 +36,7 @@ public struct DesktopState: Codable, Equatable, Sendable {
   }
 }
 
+/// Describes a running macOS application.
 public struct ApplicationState: Codable, Equatable, Hashable, Sendable {
   public let name: String
   public let bundleIdentifier: String?
@@ -46,6 +49,7 @@ public struct ApplicationState: Codable, Equatable, Hashable, Sendable {
   }
 }
 
+/// Describes an accessible application window.
 public struct WindowState: Codable, Equatable, Sendable, Identifiable {
   public let id: String
   public let title: String?
@@ -60,6 +64,7 @@ public struct WindowState: Codable, Equatable, Sendable, Identifiable {
   }
 }
 
+/// Describes one visible accessibility element without exposing the native object.
 public struct UIElementState: Codable, Equatable, Sendable, Identifiable {
   public let id: String
   public let role: String
@@ -94,6 +99,7 @@ public struct UIElementState: Codable, Equatable, Sendable, Identifiable {
   }
 }
 
+/// Records one attempted action for history and later observations.
 public struct ActionRecord: Codable, Equatable, Sendable, Identifiable {
   public let id: UUID
   public let timestamp: Date

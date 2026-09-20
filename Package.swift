@@ -1,7 +1,9 @@
 // swift-tools-version: 6.0
+// Declares the Swift package targets and required macOS frameworks.
 
 import PackageDescription
 
+/// Configures the reusable core library, app executable, and unit tests.
 let package = Package(
   name: "JevPilot",
   platforms: [.macOS(.v14)],

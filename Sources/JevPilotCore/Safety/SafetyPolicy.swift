@@ -1,5 +1,7 @@
+// Applies deterministic local risk rules to proposed automation actions.
 import Foundation
 
+/// Converts action semantics, UI metadata, and confidence into a safety decision.
 public struct SafetyPolicy: Sendable {
   public var lowRiskConfidenceThreshold: Double
   public var mediumRiskConfidenceThreshold: Double
@@ -11,6 +13,7 @@ public struct SafetyPolicy: Sendable {
     self.mediumRiskConfidenceThreshold = mediumRiskConfidenceThreshold
   }
 
+  /// Returns the allow, confirmation, or denial result for one concrete action.
   public func assess(action: AutomationAction, confidence: Double, state: DesktopState)
     -> SafetyAssessment
   {
@@ -58,6 +61,7 @@ public struct SafetyPolicy: Sendable {
     }
   }
 
+  /// Blocks credential and payment goals before any provider request is made.
   public func blockedReason(forGoal goal: String) -> String? {
     let normalized = goal.lowercased()
     let sensitiveTerms = ["password", "passcode", "credit card", "security code", "cvv"]
@@ -66,6 +70,7 @@ public struct SafetyPolicy: Sendable {
       "Commands containing credentials or payment data are blocked before any desktop state is sent to Jev."
   }
 
+  /// Assigns the base risk level from the action's semantics.
   public func riskLevel(for action: AutomationAction) -> RiskLevel {
     switch action {
     case .openApp, .focusApp, .focusElement, .scrollUp, .scrollDown, .stop:

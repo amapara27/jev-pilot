@@ -1,6 +1,9 @@
+// Calls TypeSafe Jev and strictly validates its constrained choice response.
 import Foundation
 
+/// Serializes provider access while keeping model output within local candidates.
 public actor JevDecisionEngine: DecisionEngine {
+  /// Configures the provider endpoint, model name, and request timeout.
   public struct Configuration: Sendable {
     public var endpoint: URL
     public var model: String
@@ -31,6 +34,7 @@ public actor JevDecisionEngine: DecisionEngine {
     self.apiKeyProvider = apiKeyProvider
   }
 
+  /// Requests one candidate choice and rejects malformed or unsafe provider output.
   public func decide(
     goal: String,
     state: DesktopState,

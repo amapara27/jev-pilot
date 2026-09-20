@@ -1,11 +1,14 @@
+// Declares the boundary for reading desktop state.
 import Foundation
 
+/// Supplies permission checks and fresh desktop snapshots to the controller.
 @MainActor
 public protocol DesktopPerceiving: AnyObject {
   func requestAccessibilityPermission(prompt: Bool) -> Bool
   func snapshot(recentActions: [ActionRecord]) throws -> DesktopState
 }
 
+/// Describes failures that prevent a desktop snapshot.
 public enum PerceptionError: LocalizedError {
   case accessibilityPermissionRequired
   case noFrontmostApplication

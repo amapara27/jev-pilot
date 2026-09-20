@@ -1,7 +1,9 @@
+// Executes approved actions through AppKit, Accessibility, and CoreGraphics.
 import AppKit
 import ApplicationServices
 import Foundation
 
+/// Contains the system's only direct macOS desktop side effects.
 @MainActor
 public final class MacOSActionExecutor: ActionExecuting {
   private unowned let perception: AccessibilityPerception
@@ -10,6 +12,7 @@ public final class MacOSActionExecutor: ActionExecuting {
     self.perception = perception
   }
 
+  /// Resolves and performs one concrete action, failing safely for stale UI targets.
   public func execute(_ action: AutomationAction) async -> ExecutionResult {
     switch action {
     case .openApp(let bundleIdentifier, let name):

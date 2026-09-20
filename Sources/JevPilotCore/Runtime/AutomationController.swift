@@ -1,8 +1,11 @@
+// Coordinates the observe, decide, safety-check, and execute automation loop.
 import Combine
 import Foundation
 
+/// Publishes automation state to SwiftUI and controls one cancellable run at a time.
 @MainActor
 public final class AutomationController: ObservableObject {
+  /// Represents the controller's current lifecycle state for the UI.
   public enum Status: Equatable {
     case idle
     case running(step: Int)
@@ -54,6 +57,7 @@ public final class AutomationController: ObservableObject {
     self.maximumSteps = maximumSteps
   }
 
+  /// Starts a fresh run after rejecting empty or locally blocked goals.
   public func run(goal: String) {
     let trimmed = goal.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return }
@@ -71,6 +75,7 @@ public final class AutomationController: ObservableObject {
     }
   }
 
+  /// Cancels the active run and clears a pending confirmation.
   public func cancel() {
     task?.cancel()
     task = nil
@@ -78,6 +83,7 @@ public final class AutomationController: ObservableObject {
     if case .running = status { status = .idle }
   }
 
+  /// Executes the pending reviewed action and resumes from fresh state.
   public func confirmPendingAction() {
     guard let pending = pendingConfirmation else { return }
     pendingConfirmation = nil
@@ -90,6 +96,7 @@ public final class AutomationController: ObservableObject {
     }
   }
 
+  /// Declines the pending action without executing it.
   public func rejectPendingAction() {
     guard let pending = pendingConfirmation else { return }
     debugEvents.append(
@@ -103,6 +110,7 @@ public final class AutomationController: ObservableObject {
     _ = perception.requestAccessibilityPermission(prompt: true)
   }
 
+  /// Repeats one bounded observe-decide-act step until a terminal condition.
   private func runLoop(goal: String, startingAt: Int) async {
     guard startingAt <= maximumSteps else {
       status = .failed("Reached the \(maximumSteps)-step safety limit.")
@@ -183,6 +191,7 @@ public final class AutomationController: ObservableObject {
     status = .failed("Reached the \(maximumSteps)-step safety limit.")
   }
 
+  /// Performs a selected action and records the resulting history and debug event.
   private func execute(_ decision: ActionDecision) async -> Bool {
     let result = await executor.execute(decision.candidate.action)
     history.append(

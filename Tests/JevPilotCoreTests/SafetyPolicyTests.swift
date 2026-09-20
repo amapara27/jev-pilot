@@ -1,7 +1,9 @@
+// Tests the local safety policy's confidence and blocking rules.
 import XCTest
 
 @testable import JevPilotCore
 
+/// Verifies policy outcomes without involving the model or desktop.
 final class SafetyPolicyTests: XCTestCase {
   private let policy = SafetyPolicy()
 

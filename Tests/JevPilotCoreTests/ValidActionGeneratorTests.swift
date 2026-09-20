@@ -1,8 +1,10 @@
+// Tests candidate generation against deterministic desktop snapshots.
 import ApplicationServices
 import XCTest
 
 @testable import JevPilotCore
 
+/// Verifies the generator offers only bounded, currently valid actions.
 @MainActor
 final class ValidActionGeneratorTests: XCTestCase {
   func testGeneratesOnlyEnabledElementActionsAndStop() {

@@ -1,7 +1,9 @@
+// Reads the frontmost app's Accessibility tree into a bounded desktop snapshot.
 import AppKit
 import ApplicationServices
 import Foundation
 
+/// Maintains snapshot-local native elements while exporting safe serializable state.
 @MainActor
 public final class AccessibilityPerception: DesktopPerceiving {
   private var elementRegistry: [String: AXUIElement] = [:]
@@ -13,12 +15,14 @@ public final class AccessibilityPerception: DesktopPerceiving {
     self.maximumDepth = maximumDepth
   }
 
+  /// Checks Accessibility trust and optionally opens the system permission prompt.
   public func requestAccessibilityPermission(prompt: Bool) -> Bool {
     guard prompt else { return AXIsProcessTrusted() }
     let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
     return AXIsProcessTrustedWithOptions(options)
   }
 
+  /// Captures the active app, windows, controls, and recent action history.
   public func snapshot(recentActions: [ActionRecord]) throws -> DesktopState {
     guard AXIsProcessTrusted() else {
       throw PerceptionError.accessibilityPermissionRequired
@@ -83,6 +87,7 @@ public final class AccessibilityPerception: DesktopPerceiving {
     )
   }
 
+  /// Resolves a snapshot-local ID for the executor, if it is still current.
   public func element(for id: String) -> AXUIElement? {
     elementRegistry[id]
   }

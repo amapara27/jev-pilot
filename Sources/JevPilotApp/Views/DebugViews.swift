@@ -1,6 +1,8 @@
+// Defines SwiftUI views for the automation timeline, state, and candidates.
 import JevPilotCore
 import SwiftUI
 
+/// Displays the chronological debug events from one run.
 struct TimelineView: View {
   let events: [DebugEvent]
 
@@ -44,6 +46,7 @@ struct TimelineView: View {
   }
 }
 
+/// Renders any encodable debug value as readable JSON.
 struct JSONDebugView<Value: Encodable>: View {
   let title: String
   let value: Value?
@@ -70,6 +73,7 @@ struct JSONDebugView<Value: Encodable>: View {
   }
 }
 
+/// Lists current candidates and highlights the model's selected action.
 struct ActionsView: View {
   let actions: [ActionCandidate]
   let decision: ActionDecision?

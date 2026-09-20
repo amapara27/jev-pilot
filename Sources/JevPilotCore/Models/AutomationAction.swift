@@ -1,5 +1,7 @@
+// Defines the finite, typed set of actions the app may execute.
 import Foundation
 
+/// Represents one concrete, locally generated desktop action.
 public enum AutomationAction: Codable, Equatable, Hashable, Sendable {
   case openApp(bundleIdentifier: String, name: String)
   case focusApp(bundleIdentifier: String, name: String)
@@ -12,6 +14,7 @@ public enum AutomationAction: Codable, Equatable, Hashable, Sendable {
   case scrollDown
   case stop(reason: String)
 
+  /// Returns the stable category used in logs and policy decisions.
   public var kind: ActionKind {
     switch self {
     case .openApp: .openApp
@@ -27,6 +30,7 @@ public enum AutomationAction: Codable, Equatable, Hashable, Sendable {
     }
   }
 
+  /// Produces a human-readable description for the UI and debug log.
   public var summary: String {
     switch self {
     case .openApp(_, let name): "Open \(name)"
@@ -43,6 +47,7 @@ public enum AutomationAction: Codable, Equatable, Hashable, Sendable {
   }
 }
 
+/// Names the action categories exposed to the decision system.
 public enum ActionKind: String, Codable, CaseIterable, Sendable {
   case openApp = "OPEN_APP"
   case focusApp = "FOCUS_APP"
@@ -56,6 +61,7 @@ public enum ActionKind: String, Codable, CaseIterable, Sendable {
   case stop = "STOP"
 }
 
+/// Lists the keyboard inputs that can be generated safely.
 public enum KeyPress: String, Codable, CaseIterable, Sendable {
   case returnKey = "return"
   case escape
@@ -67,6 +73,7 @@ public enum KeyPress: String, Codable, CaseIterable, Sendable {
   case rightArrow = "right_arrow"
 }
 
+/// Connects an opaque model-facing ID to one local action.
 public struct ActionCandidate: Codable, Equatable, Sendable, Identifiable {
   public let id: String
   public let action: AutomationAction

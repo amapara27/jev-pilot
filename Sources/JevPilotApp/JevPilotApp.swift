@@ -1,11 +1,14 @@
+// Defines the SwiftUI app entry point and wires together production services.
 import JevPilotCore
 import SwiftUI
 
+/// Creates shared automation services and the app's main scenes.
 @main
 struct JevPilotApp: App {
   @StateObject private var controller: AutomationController
   @StateObject private var speechRecognizer = LocalSpeechRecognizer()
 
+  /// Connects perception, decision, and execution through one controller.
   init() {
     let perception = AccessibilityPerception()
     let keyStore = KeychainAPIKeyStore()

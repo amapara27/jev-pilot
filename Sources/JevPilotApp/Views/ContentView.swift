@@ -1,6 +1,8 @@
+// Renders the command composer, status, debug panels, and confirmation prompt.
 import JevPilotCore
 import SwiftUI
 
+/// Provides the main window for starting and inspecting automation runs.
 struct ContentView: View {
   @ObservedObject var controller: AutomationController
   @ObservedObject var speechRecognizer: LocalSpeechRecognizer
@@ -125,11 +127,13 @@ struct ContentView: View {
     return .secondary
   }
 
+  /// Stops dictation and starts the controller with the current command.
   private func run() {
     speechRecognizer.stop()
     controller.run(goal: command)
   }
 
+  /// Starts or stops on-device speech transcription.
   private func toggleRecording() {
     if speechRecognizer.isRecording {
       speechRecognizer.stop()
@@ -139,6 +143,7 @@ struct ContentView: View {
   }
 }
 
+/// Identifies the detail view currently shown beside the command controls.
 private enum DebugPanel: String, CaseIterable, Identifiable {
   case timeline
   case state

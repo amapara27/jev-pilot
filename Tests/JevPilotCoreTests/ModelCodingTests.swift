@@ -1,7 +1,9 @@
+// Tests that shared action models retain their data through JSON encoding.
 import XCTest
 
 @testable import JevPilotCore
 
+/// Verifies the action contract remains serializable.
 final class ModelCodingTests: XCTestCase {
   func testEveryActionRoundTripsThroughJSON() throws {
     let actions: [AutomationAction] = [

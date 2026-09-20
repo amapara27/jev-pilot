@@ -1,6 +1,8 @@
+// Stores and retrieves the TypeSafe API key using the macOS Keychain.
 import Foundation
 import Security
 
+/// Provides the app's small, Keychain-backed API-key storage boundary.
 public final class KeychainAPIKeyStore: @unchecked Sendable {
   public static let defaultService = "ai.typesafe.jev-pilot"
 
@@ -12,6 +14,7 @@ public final class KeychainAPIKeyStore: @unchecked Sendable {
     self.account = account
   }
 
+  /// Loads the stored key, returning nil when no key has been saved.
   public func load() throws -> String? {
     let query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
@@ -31,6 +34,7 @@ public final class KeychainAPIKeyStore: @unchecked Sendable {
     return key
   }
 
+  /// Creates or replaces the stored key.
   public func save(_ key: String) throws {
     let data = Data(key.utf8)
     let query: [String: Any] = [
@@ -50,6 +54,7 @@ public final class KeychainAPIKeyStore: @unchecked Sendable {
     }
   }
 
+  /// Removes the stored key if it exists.
   public func delete() throws {
     let query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
@@ -62,6 +67,7 @@ public final class KeychainAPIKeyStore: @unchecked Sendable {
     }
   }
 
+  /// Loads Keychain first, then the development-only environment fallback.
   public func loadFromKeychainOrEnvironment() throws -> String {
     if let key = try load(), !key.isEmpty { return key }
     if let key = ProcessInfo.processInfo.environment["TYPESAFE_API_KEY"], !key.isEmpty {
@@ -71,6 +77,7 @@ public final class KeychainAPIKeyStore: @unchecked Sendable {
   }
 }
 
+/// Converts an OSStatus from Keychain services into a readable error.
 public struct KeychainError: LocalizedError {
   public let status: OSStatus
 

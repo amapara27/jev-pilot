@@ -1,6 +1,9 @@
+// Defines debug timeline entries and paused confirmation state.
 import Foundation
 
+/// Records one observable event during an automation run.
 public struct DebugEvent: Identifiable, Sendable {
+  /// Categorizes timeline entries for display and diagnosis.
   public enum Kind: String, Sendable {
     case observation
     case candidates
@@ -23,6 +26,7 @@ public struct DebugEvent: Identifiable, Sendable {
   }
 }
 
+/// Holds an approved-but-not-yet-executed action while awaiting the user.
 public struct PendingConfirmation: Sendable {
   public let goal: String
   public let nextStep: Int

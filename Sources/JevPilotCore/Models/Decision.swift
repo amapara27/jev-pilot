@@ -1,5 +1,7 @@
+// Defines decision, safety, and execution result data shared across the system.
 import Foundation
 
+/// Stores Jev's validated selection and confidence information.
 public struct ActionDecision: Codable, Equatable, Sendable {
   public let candidate: ActionCandidate
   public let confidence: Double
@@ -22,6 +24,7 @@ public struct ActionDecision: Codable, Equatable, Sendable {
   }
 }
 
+/// Classifies an action's potential impact.
 public enum RiskLevel: String, Codable, Sendable {
   case low
   case medium
@@ -29,12 +32,14 @@ public enum RiskLevel: String, Codable, Sendable {
   case blocked
 }
 
+/// States whether local policy allows, pauses, or denies an action.
 public enum SafetyDisposition: String, Codable, Sendable {
   case allow
   case requireConfirmation
   case deny
 }
 
+/// Explains the local policy result for a selected action.
 public struct SafetyAssessment: Codable, Equatable, Sendable {
   public let risk: RiskLevel
   public let disposition: SafetyDisposition
@@ -47,6 +52,7 @@ public struct SafetyAssessment: Codable, Equatable, Sendable {
   }
 }
 
+/// Reports whether the native executor completed an action.
 public struct ExecutionResult: Codable, Equatable, Sendable {
   public let succeeded: Bool
   public let message: String

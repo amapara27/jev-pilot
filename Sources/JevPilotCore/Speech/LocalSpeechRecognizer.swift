@@ -1,8 +1,10 @@
+// Provides on-device speech transcription for the command composer.
 import AVFoundation
 import Combine
 import Foundation
 import Speech
 
+/// Manages microphone capture and Apple Speech recognition state for SwiftUI.
 @MainActor
 public final class LocalSpeechRecognizer: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
   @Published public private(set) var transcript = ""
@@ -21,6 +23,7 @@ public final class LocalSpeechRecognizer: NSObject, ObservableObject, SFSpeechRe
     recognizer?.delegate = self
   }
 
+  /// Requests permissions and starts recording on-device speech.
   public func start() async {
     guard !isRecording else { return }
     errorMessage = nil
@@ -79,6 +82,7 @@ public final class LocalSpeechRecognizer: NSObject, ObservableObject, SFSpeechRe
     }
   }
 
+  /// Stops audio capture and releases the current recognition request.
   public func stop() {
     if audioEngine.isRunning { audioEngine.stop() }
     if tapInstalled {

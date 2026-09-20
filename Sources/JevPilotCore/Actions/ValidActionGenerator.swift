@@ -1,9 +1,12 @@
+// Builds the finite list of actions that are valid for the current snapshot.
 import AppKit
 import ApplicationServices
 import Foundation
 
+/// Derives safe, concrete candidates instead of parsing model-supplied commands.
 @MainActor
 public struct ValidActionGenerator {
+  /// Identifies an application that the generator may offer to launch.
   public struct SupportedApplication: Sendable {
     public let name: String
     public let bundleIdentifiers: [String]
@@ -30,6 +33,7 @@ public struct ValidActionGenerator {
     self.supportedApplications = supportedApplications
   }
 
+  /// Returns at most 255 current-state candidates, always including STOP.
   public func candidates(for goal: String, state: DesktopState) -> [ActionCandidate] {
     var actions: [(AutomationAction, String)] = []
     let activeBundleID = state.activeApplication?.bundleIdentifier
