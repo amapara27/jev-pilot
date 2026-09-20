@@ -1,0 +1,14 @@
+# Packages Jev Lab so its tests and scripts share one import path.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jev-lab"
+version = "0.1.0"
+description = "TypeSafe Jev call and mock-state experimentation lab for Jev Pilot"
+requires-python = ">=3.12"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jev_lab*"]
