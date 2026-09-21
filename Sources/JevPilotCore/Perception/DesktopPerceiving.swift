@@ -12,6 +12,7 @@ public protocol DesktopPerceiving: AnyObject {
 public enum PerceptionError: LocalizedError {
   case accessibilityPermissionRequired
   case noFrontmostApplication
+  case controlCenterIsFrontmost
 
   public var errorDescription: String? {
     switch self {
@@ -19,6 +20,8 @@ public enum PerceptionError: LocalizedError {
       "Accessibility permission is required. Enable Jev Pilot in System Settings → Privacy & Security → Accessibility."
     case .noFrontmostApplication:
       "No frontmost application could be identified."
+    case .controlCenterIsFrontmost:
+      "Jev Pilot is in front. Switch to the app you want to control and start a new command."
     }
   }
 }

@@ -1,109 +1,102 @@
-// Provides on-device speech transcription for the command composer.
+// Captures on-device speech; session identities reject callbacks after Stop or restart.
 import AVFoundation
 import Combine
 import Foundation
 import Speech
 
-/// Manages microphone capture and Apple Speech recognition state for SwiftUI.
+public enum SpeechEvent: Sendable {
+  case transcript(String, isFinal: Bool)
+  case failed(String)
+}
+
+/// Allows deterministic speech tests without microphone access.
 @MainActor
-public final class LocalSpeechRecognizer: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
+public protocol SpeechProviding: AnyObject {
+  var onEvent: ((SpeechEvent) -> Void)? { get set }
+  func start() async
+  func stop()
+}
+
+@MainActor
+public final class LocalSpeechRecognizer: NSObject, ObservableObject, SpeechProviding {
   @Published public private(set) var transcript = ""
   @Published public private(set) var isRecording = false
   @Published public private(set) var errorMessage: String?
-
+  public var onEvent: ((SpeechEvent) -> Void)?
   private let audioEngine = AVAudioEngine()
   private let recognizer: SFSpeechRecognizer?
   private var request: SFSpeechAudioBufferRecognitionRequest?
-  private var task: SFSpeechRecognitionTask?
+  private var recognitionTask: SFSpeechRecognitionTask?
   private var tapInstalled = false
+  private var generation = UUID()
 
   public init(locale: Locale = .current) {
     recognizer = SFSpeechRecognizer(locale: locale)
     super.init()
-    recognizer?.delegate = self
   }
 
-  /// Requests permissions and starts recording on-device speech.
+  /// Permission prompts are only reached by an explicit listening action.
   public func start() async {
-    guard !isRecording else { return }
-    errorMessage = nil
-    let speechAuthorized = await requestSpeechAuthorization()
-    guard speechAuthorized else {
-      errorMessage = "Speech Recognition permission is required."
-      return
-    }
-    guard await requestMicrophoneAuthorization() else {
-      errorMessage = "Microphone permission is required."
-      return
-    }
-    guard let recognizer, recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
-      errorMessage = "On-device speech recognition is unavailable for this language."
-      return
-    }
-
-    task?.cancel()
-    task = nil
+    guard !Task.isCancelled else { return }
+    stop()
+    let id = generation
     transcript = ""
-
+    errorMessage = nil
+    let authorized = await withCheckedContinuation { continuation in
+      SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0 == .authorized) }
+    }
+    guard id == generation, !Task.isCancelled else { return }
+    guard authorized else { fail("Speech Recognition permission is required."); return }
+    let microphone = await AVCaptureDevice.requestAccess(for: .audio)
+    guard id == generation, !Task.isCancelled else { return }
+    guard microphone else { fail("Microphone permission is required."); return }
+    guard let recognizer, recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
+      fail("On-device speech recognition is unavailable for this language."); return
+    }
     let request = SFSpeechAudioBufferRecognitionRequest()
     request.requiresOnDeviceRecognition = true
     request.shouldReportPartialResults = true
     self.request = request
-
     let input = audioEngine.inputNode
     let format = input.outputFormat(forBus: 0)
-    input.installTap(onBus: 0, bufferSize: 1_024, format: format) { [weak request] buffer, _ in
-      request?.append(buffer)
-    }
+    guard format.sampleRate > 0, format.channelCount > 0 else { fail("No microphone is available."); return }
+    input.installTap(onBus: 0, bufferSize: 1_024, format: format) { [weak request] buffer, _ in request?.append(buffer) }
     tapInstalled = true
-
-    task = recognizer.recognitionTask(with: request) { [weak self] result, error in
+    recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
+      let text = result?.bestTranscription.formattedString
+      let final = result?.isFinal ?? false
+      let message = error?.localizedDescription
       Task { @MainActor in
-        guard let self else { return }
-        if let result {
-          self.transcript = result.bestTranscription.formattedString
-          if result.isFinal { self.stop() }
+        guard let self, self.generation == id else { return }
+        if let text {
+          self.transcript = text
+          self.onEvent?(.transcript(text, isFinal: final))
         }
-        if let error {
-          self.errorMessage = error.localizedDescription
-          self.stop()
-        }
+        // Submission may have invalidated this task during the callback above.
+        if self.generation == id, let message { self.fail(message) }
       }
     }
-
     do {
       audioEngine.prepare()
       try audioEngine.start()
       isRecording = true
-    } catch {
-      input.removeTap(onBus: 0)
-      tapInstalled = false
-      errorMessage = error.localizedDescription
-    }
+    } catch { fail("The microphone could not start: \(error.localizedDescription)") }
   }
 
-  /// Stops audio capture and releases the current recognition request.
+  /// Cancel, rather than finalize, to prevent Stop from submitting partial speech.
   public func stop() {
+    generation = UUID()
     if audioEngine.isRunning { audioEngine.stop() }
-    if tapInstalled {
-      audioEngine.inputNode.removeTap(onBus: 0)
-      tapInstalled = false
-    }
+    if tapInstalled { audioEngine.inputNode.removeTap(onBus: 0); tapInstalled = false }
+    recognitionTask?.cancel()
+    recognitionTask = nil
     request?.endAudio()
     request = nil
-    task = nil
     isRecording = false
   }
-
-  private func requestSpeechAuthorization() async -> Bool {
-    await withCheckedContinuation { continuation in
-      SFSpeechRecognizer.requestAuthorization { status in
-        continuation.resume(returning: status == .authorized)
-      }
-    }
-  }
-
-  private func requestMicrophoneAuthorization() async -> Bool {
-    await AVCaptureDevice.requestAccess(for: .audio)
+  private func fail(_ message: String) {
+    stop()
+    errorMessage = message
+    onEvent?(.failed(message))
   }
 }

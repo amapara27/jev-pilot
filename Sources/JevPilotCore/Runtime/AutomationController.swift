@@ -1,26 +1,26 @@
-// Coordinates the observe, decide, safety-check, and execute automation loop.
+// Coordinates cancellable automation and checkpoints compact run records.
 import Combine
 import Foundation
 
-/// Publishes automation state to SwiftUI and controls one cancellable run at a time.
+/// Owns one bounded run; generation checks isolate every asynchronous continuation.
 @MainActor
 public final class AutomationController: ObservableObject {
-  /// Represents the controller's current lifecycle state for the UI.
   public enum Status: Equatable {
-    case idle
-    case running(step: Int)
-    case awaitingConfirmation
-    case completed
-    case failed(String)
-
+    case idle, running(step: Int), awaitingConfirmation, completed, stopped, rejected, blocked(String), failed(String)
     public var label: String {
       switch self {
-      case .idle: "Idle"
+      case .idle: "Ready"
       case .running(let step): "Running step \(step)"
-      case .awaitingConfirmation: "Waiting for confirmation"
+      case .awaitingConfirmation: "Needs confirmation"
       case .completed: "Completed"
-      case .failed(let message): "Failed: \(message)"
+      case .stopped: "Stopped"
+      case .rejected: "Action rejected"
+      case .blocked(let reason): reason
+      case .failed(let reason): reason
       }
+    }
+    public var isActive: Bool {
+      switch self { case .running, .awaitingConfirmation: true; default: false }
     }
   }
 
@@ -32,13 +32,17 @@ public final class AutomationController: ObservableObject {
   @Published public private(set) var pendingConfirmation: PendingConfirmation?
   @Published public private(set) var history: [ActionRecord] = []
   @Published public private(set) var debugEvents: [DebugEvent] = []
-
+  @Published public private(set) var currentRun: RunRecord?
+  public let store: RunStore
+  public var pricing = TokenPricing()
   private let perception: DesktopPerceiving
   private let actionGenerator: ValidActionGenerator
   private let decisionEngine: any DecisionEngine
   private let safetyPolicy: SafetyPolicy
   private let executor: ActionExecuting
   private let maximumSteps: Int
+  private let stabilizationMilliseconds: Int
+  private var generation = UUID()
   private var task: Task<Void, Never>?
 
   public init(
@@ -47,7 +51,9 @@ public final class AutomationController: ObservableObject {
     decisionEngine: any DecisionEngine,
     safetyPolicy: SafetyPolicy = SafetyPolicy(),
     executor: ActionExecuting,
-    maximumSteps: Int = 12
+    maximumSteps: Int = 12,
+    store: RunStore? = nil,
+    stabilizationMilliseconds: Int = 350
   ) {
     self.perception = perception
     self.actionGenerator = actionGenerator
@@ -55,155 +61,164 @@ public final class AutomationController: ObservableObject {
     self.safetyPolicy = safetyPolicy
     self.executor = executor
     self.maximumSteps = maximumSteps
+    self.store = store ?? RunStore(inMemory: true)
+    self.stabilizationMilliseconds = stabilizationMilliseconds
   }
 
-  /// Starts a fresh run after rejecting empty or locally blocked goals.
+  /// Starting from either surface uses the same single-run boundary.
   public func run(goal: String) {
-    let trimmed = goal.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else { return }
-    cancel()
-    transcript = trimmed
+    let goal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !goal.isEmpty, store.isLoaded, !status.isActive else { return }
+    generation = UUID()
+    let id = generation
+    transcript = goal
     history = []
     debugEvents = []
-    if let reason = safetyPolicy.blockedReason(forGoal: trimmed) {
-      debugEvents.append(.init(kind: .safety, title: "Command blocked", detail: reason))
-      status = .failed(reason)
+    latestState = nil
+    latestDecision = nil
+    availableActions = []
+    currentRun = RunRecord(command: goal, pricing: pricing)
+    checkpoint()
+    if let reason = safetyPolicy.blockedReason(forGoal: goal) {
+      finish(.blocked, status: .blocked(reason), detail: reason)
       return
     }
-    task = Task { [weak self] in
-      await self?.runLoop(goal: trimmed, startingAt: 1)
-    }
+    status = .running(step: 1)
+    task = Task { [weak self] in await self?.runLoop(goal: goal, startingAt: 1, generation: id) }
   }
 
-  /// Cancels the active run and clears a pending confirmation.
+  /// Invalidates work before cancellation so even a cancellation-ignoring provider is harmless.
   public func cancel() {
+    generation = UUID()
     task?.cancel()
     task = nil
     pendingConfirmation = nil
-    if case .running = status { status = .idle }
+    if currentRun?.outcome == nil, currentRun != nil { finish(.stopped, status: .stopped) }
   }
 
-  /// Executes the pending reviewed action and resumes from fresh state.
+  /// Validates the reviewed desktop again after the app restores the external target.
   public func confirmPendingAction() {
-    guard let pending = pendingConfirmation else { return }
+    guard let pending = pendingConfirmation, let original = latestState else { return }
     pendingConfirmation = nil
+    let id = generation
+    status = .running(step: pending.nextStep - 1)
     task = Task { [weak self] in
-      guard let self else { return }
-      let shouldContinue = await self.execute(pending.decision)
-      if shouldContinue {
-        await self.runLoop(goal: pending.goal, startingAt: pending.nextStep)
+      guard let self, self.isCurrent(id) else { return }
+      do {
+        let fresh = try self.perception.snapshot(recentActions: self.history)
+        guard Self.sameTarget(original, fresh) else {
+          self.finish(.failed, status: .failed("The target changed. Start a new command."), detail: "Confirmation target changed.")
+          return
+        }
+        guard self.isCurrent(id) else { return }
+        if await self.execute(pending.decision, generation: id) {
+          await self.runLoop(goal: pending.goal, startingAt: pending.nextStep, generation: id)
+        }
+      } catch {
+        guard self.isCurrent(id) else { return }
+        self.finish(.failed, status: .failed(error.localizedDescription), detail: "Could not validate the confirmation target.")
       }
     }
   }
 
-  /// Declines the pending action without executing it.
   public func rejectPendingAction() {
-    guard let pending = pendingConfirmation else { return }
-    debugEvents.append(
-      .init(
-        kind: .safety, title: "Action rejected", detail: pending.decision.candidate.action.summary))
+    guard pendingConfirmation != nil else { return }
+    generation = UUID()
     pendingConfirmation = nil
-    status = .idle
+    finish(.rejected, status: .rejected)
   }
+  public func requestAccessibilityPermission() { _ = perception.requestAccessibilityPermission(prompt: true) }
 
-  public func requestAccessibilityPermission() {
-    _ = perception.requestAccessibilityPermission(prompt: true)
+  private static func sameTarget(_ lhs: DesktopState, _ rhs: DesktopState) -> Bool {
+    lhs.activeApplication == rhs.activeApplication && lhs.windows == rhs.windows
+      && lhs.focusedWindowID == rhs.focusedWindowID && lhs.focusedElementID == rhs.focusedElementID
+      && lhs.elements == rhs.elements
   }
+  private func isCurrent(_ id: UUID) -> Bool { generation == id && !Task.isCancelled && currentRun?.outcome == nil }
 
-  /// Repeats one bounded observe-decide-act step until a terminal condition.
-  private func runLoop(goal: String, startingAt: Int) async {
+  /// Observation and native execution stay on the main actor; network work suspends it.
+  private func runLoop(goal: String, startingAt: Int, generation id: UUID) async {
+    guard isCurrent(id) else { return }
     guard startingAt <= maximumSteps else {
-      status = .failed("Reached the \(maximumSteps)-step safety limit.")
+      finish(.failed, status: .failed("Reached the \(maximumSteps)-step safety limit."), detail: "Step limit reached.")
       return
     }
     for step in startingAt...maximumSteps {
-      guard !Task.isCancelled else { return }
+      guard isCurrent(id) else { return }
       status = .running(step: step)
       do {
         let state = try perception.snapshot(recentActions: history)
         latestState = state
-        debugEvents.append(
-          .init(
-            kind: .observation,
-            title: "Observed \(state.activeApplication?.name ?? "desktop")",
-            detail: "\(state.windows.count) windows, \(state.elements.count) interactive elements"
-          ))
-
+        debugEvents.append(.init(kind: .observation, title: "Observed \(state.activeApplication?.name ?? "desktop")", detail: "\(state.windows.count) windows, \(state.elements.count) controls"))
         let candidates = actionGenerator.candidates(for: goal, state: state)
         availableActions = candidates
-        debugEvents.append(
-          .init(
-            kind: .candidates,
-            title: "Generated \(candidates.count) valid actions",
-            detail: candidates.map { "\($0.id): \($0.action.summary)" }.joined(separator: "\n")
-          ))
-
-        let decision = try await decisionEngine.decide(
-          goal: goal, state: state, candidates: candidates)
+        debugEvents.append(.init(kind: .candidates, title: "\(candidates.count) valid actions", detail: candidates.map { "\($0.id): \($0.action.summary)" }.joined(separator: "\n")))
+        let runID = currentRun!.id
+        let decision = try await decisionEngine.decide(goal: goal, state: state, candidates: candidates) { [weak self] metric in
+          Task { @MainActor in self?.record(metric, runID: runID) }
+        }
+        guard isCurrent(id) else { return }
         latestDecision = decision
-        debugEvents.append(
-          .init(
-            kind: .decision,
-            title: decision.candidate.action.summary,
-            detail:
-              "confidence \(decision.confidence.formatted(.percent.precision(.fractionLength(1)))) · \(decision.model) · \(decision.latencyMilliseconds) ms"
-          ))
-
-        let assessment = safetyPolicy.assess(
-          action: decision.candidate.action,
-          confidence: decision.confidence,
-          state: state
-        )
-        debugEvents.append(
-          .init(kind: .safety, title: assessment.disposition.rawValue, detail: assessment.reason))
-
+        debugEvents.append(.init(kind: .decision, title: decision.candidate.action.summary, detail: "\(decision.model) · \(decision.latencyMilliseconds) ms · \(Int(decision.confidence * 100))% confidence"))
+        let assessment = safetyPolicy.assess(action: decision.candidate.action, confidence: decision.confidence, state: state)
+        debugEvents.append(.init(kind: .safety, title: assessment.disposition.rawValue, detail: assessment.reason))
         switch assessment.disposition {
         case .allow:
-          if !(await execute(decision)) { return }
+          if !(await execute(decision, generation: id)) { return }
         case .requireConfirmation:
-          pendingConfirmation = PendingConfirmation(
-            goal: goal,
-            nextStep: step + 1,
-            decision: decision,
-            assessment: assessment
-          )
+          pendingConfirmation = .init(goal: goal, nextStep: step + 1, decision: decision, assessment: assessment)
+          addEvent(.init(kind: .confirmation, title: decision.candidate.action.summary, detail: assessment.reason))
           status = .awaitingConfirmation
           return
         case .deny:
-          status = .failed(assessment.reason)
+          finish(.blocked, status: .blocked(assessment.reason), detail: assessment.reason)
           return
         }
-
-        if case .stop = decision.candidate.action {
-          status = .completed
-          return
-        }
-        try await Task.sleep(for: .milliseconds(350))
-      } catch is CancellationError {
-        return
+        try await Task.sleep(for: .milliseconds(stabilizationMilliseconds))
       } catch {
-        debugEvents.append(
-          .init(kind: .error, title: "Automation stopped", detail: error.localizedDescription))
-        status = .failed(error.localizedDescription)
+        guard isCurrent(id) else { return }
+        debugEvents.append(.init(kind: .error, title: "Automation stopped", detail: error.localizedDescription))
+        finish(.failed, status: .failed(error.localizedDescription), detail: "The run could not continue. Check permissions and provider access.")
         return
       }
     }
-    status = .failed("Reached the \(maximumSteps)-step safety limit.")
+    if isCurrent(id) { finish(.failed, status: .failed("Reached the \(maximumSteps)-step safety limit."), detail: "Step limit reached.") }
   }
 
-  /// Performs a selected action and records the resulting history and debug event.
-  private func execute(_ decision: ActionDecision) async -> Bool {
-    let result = await executor.execute(decision.candidate.action)
-    history.append(
-      ActionRecord(
-        action: decision.candidate.action, succeeded: result.succeeded, message: result.message))
-    debugEvents.append(
-      .init(
-        kind: .execution, title: result.succeeded ? "Executed" : "Execution failed",
-        detail: result.message))
-    if !result.succeeded {
-      status = .failed(result.message)
+  private func execute(_ decision: ActionDecision, generation id: UUID) async -> Bool {
+    guard isCurrent(id) else { return false }
+    if case .stop = decision.candidate.action {
+      finish(.completed, status: .completed)
+      return false
     }
+    let result = await executor.execute(decision.candidate.action)
+    guard isCurrent(id) else { return false }
+    history.append(.init(action: decision.candidate.action, succeeded: result.succeeded, message: result.message))
+    debugEvents.append(.init(kind: .execution, title: result.succeeded ? "Executed" : "Execution failed", detail: result.message))
+    addEvent(.init(kind: .action, title: decision.candidate.action.summary, detail: result.succeeded ? "Executed" : "Execution failed", succeeded: result.succeeded))
+    if !result.succeeded { finish(.failed, status: .failed(result.message), detail: "Native action failed.") }
     return result.succeeded
+  }
+
+  private func record(_ metric: RequestMetric, runID: UUID) {
+    if currentRun?.id == runID {
+      if let index = currentRun?.requests.firstIndex(where: { $0.id == metric.id }) {
+        guard currentRun?.requests[index].isComplete == false else { return }
+        currentRun?.requests[index] = metric
+      } else { currentRun?.requests.append(metric) }
+      // Do not resurrect a completed run the user has already deleted.
+      if store.records.contains(where: { $0.id == runID }) { checkpoint() }
+    } else { store.appendMetric(metric, to: runID) }
+  }
+  private func addEvent(_ event: RunEvent) { currentRun?.events.append(event); checkpoint() }
+  private func checkpoint() { if let currentRun { store.upsert(currentRun) } }
+  private func finish(_ outcome: RunOutcome, status: Status, detail: String = "") {
+    guard currentRun?.outcome == nil else { return }
+    pendingConfirmation = nil
+    currentRun?.outcome = outcome
+    currentRun?.endedAt = .now
+    currentRun?.events.append(.init(kind: .status, title: outcome.rawValue.capitalized, detail: detail))
+    checkpoint()
+    self.status = status
   }
 }

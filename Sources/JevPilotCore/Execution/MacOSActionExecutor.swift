@@ -14,6 +14,10 @@ public final class MacOSActionExecutor: ActionExecuting {
 
   /// Resolves and performs one concrete action, failing safely for stale UI targets.
   public func execute(_ action: AutomationAction) async -> ExecutionResult {
+    guard !Task.isCancelled else { return .init(succeeded: false, message: "Run stopped.") }
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == perception.observedProcessIdentifier else {
+      return .init(succeeded: false, message: "The active app changed. Start a new command.")
+    }
     switch action {
     case .openApp(let bundleIdentifier, let name):
       guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)

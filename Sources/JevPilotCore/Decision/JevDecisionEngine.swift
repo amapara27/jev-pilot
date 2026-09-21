@@ -40,6 +40,14 @@ public actor JevDecisionEngine: DecisionEngine {
     state: DesktopState,
     candidates: [ActionCandidate]
   ) async throws -> ActionDecision {
+    try await decide(goal: goal, state: state, candidates: candidates, report: { _ in })
+  }
+
+  /// Reports actual network attempts even when response validation fails.
+  public func decide(
+    goal: String, state: DesktopState, candidates: [ActionCandidate],
+    report: @escaping @Sendable (RequestMetric) -> Void
+  ) async throws -> ActionDecision {
     guard !candidates.isEmpty else { throw DecisionError.noCandidates }
     let key = try apiKeyProvider().trimmingCharacters(in: .whitespacesAndNewlines)
     guard !key.isEmpty else { throw DecisionError.missingAPIKey }
@@ -68,12 +76,25 @@ public actor JevDecisionEngine: DecisionEngine {
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try JSONEncoder.jev.encode(requestBody)
 
+    try Task.checkCancellation()
     let startedAt = ContinuousClock.now
+    var metric = RequestMetric(latencyMilliseconds: 0, isComplete: false)
+    report(metric)
+    defer {
+      let duration = startedAt.duration(to: .now)
+      metric.latencyMilliseconds = Int(duration.components.seconds * 1_000)
+        + Int(duration.components.attoseconds / 1_000_000_000_000_000)
+      metric.isComplete = true
+      report(metric)
+    }
     let data: Data
     let response: URLResponse
     do {
       (data, response) = try await session.data(for: request)
+    } catch is CancellationError {
+      throw CancellationError()
     } catch {
+      if Task.isCancelled { throw CancellationError() }
       throw DecisionError.transport(error.localizedDescription)
     }
     let elapsed = startedAt.duration(to: .now)
@@ -81,12 +102,16 @@ public actor JevDecisionEngine: DecisionEngine {
       Int(elapsed.components.seconds * 1_000)
       + Int(elapsed.components.attoseconds / 1_000_000_000_000_000)
 
+    // Usage is decoded independently from the decision, including rejected responses.
+    if let usage = try? JSONDecoder().decode(UsageEnvelope.self, from: data).usage {
+      metric.inputTokens = usage.input_tokens.flatMap { $0 >= 0 ? $0 : nil }
+      metric.outputTokens = usage.output_tokens.flatMap { $0 >= 0 ? $0 : nil }
+    }
     guard let http = response as? HTTPURLResponse else {
       throw DecisionError.malformedResponse("response was not HTTP")
     }
     guard (200..<300).contains(http.statusCode) else {
-      let message = String(data: data.prefix(2_048), encoding: .utf8) ?? "no response body"
-      throw DecisionError.rejected(statusCode: http.statusCode, message: message)
+      throw DecisionError.rejected(statusCode: http.statusCode, message: "Check your API key, account access, and provider availability.")
     }
 
     let decoded: SystemOneResponse
@@ -133,6 +158,12 @@ public actor JevDecisionEngine: DecisionEngine {
       latencyMilliseconds: milliseconds
     )
   }
+}
+
+/// Optional usage never weakens validation of the actual decision payload.
+private struct UsageEnvelope: Decodable {
+  struct Usage: Decodable { let input_tokens: Int?; let output_tokens: Int? }
+  let usage: Usage?
 }
 
 private struct DecisionState: Encodable {

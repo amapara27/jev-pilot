@@ -1,37 +1,47 @@
-// Defines the SwiftUI app entry point and wires together production services.
+// Exposes a single control center, shared Settings, and a persistent macOS menu bar panel.
 import JevPilotCore
 import SwiftUI
 
-/// Creates shared automation services and the app's main scenes.
 @main
 struct JevPilotApp: App {
-  @StateObject private var controller: AutomationController
-  @StateObject private var speechRecognizer = LocalSpeechRecognizer()
-
-  /// Connects perception, decision, and execution through one controller.
-  init() {
-    let perception = AccessibilityPerception()
-    let keyStore = KeychainAPIKeyStore()
-    let decisionEngine = JevDecisionEngine {
-      try keyStore.loadFromKeychainOrEnvironment()
-    }
-    _controller = StateObject(
-      wrappedValue: AutomationController(
-        perception: perception,
-        decisionEngine: decisionEngine,
-        executor: MacOSActionExecutor(perception: perception)
-      ))
-  }
-
+  @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+  @StateObject private var model = AppModel()
   var body: some Scene {
-    WindowGroup {
-      ContentView(controller: controller, speechRecognizer: speechRecognizer)
-        .frame(minWidth: 980, minHeight: 680)
+    Window("Jev Pilot", id: "control-center") {
+      ContentView()
+        .environmentObject(model)
+        .environmentObject(model.session)
+        .environmentObject(model.controller)
+        .environmentObject(model.store)
+        .environmentObject(model.readiness)
+        .frame(minWidth: 780, minHeight: 580)
+        .onAppear { delegate.model = model }
     }
-    .defaultSize(width: 1_140, height: 760)
-
+    .defaultSize(width: 1040, height: 730)
+    .windowStyle(.hiddenTitleBar)
+    .commands {
+      CommandMenu("Control") {
+        Button("Start Listening") { model.session.startListening() }
+          .keyboardShortcut("l", modifiers: [.command, .shift])
+        Button("Stop") { model.session.stop() }
+          .keyboardShortcut(".", modifiers: .command)
+      }
+    }
+    MenuBarExtra {
+      MenuBarPanel()
+        .environmentObject(model.session)
+        .environmentObject(model.controller)
+        .environmentObject(model.store)
+        .environmentObject(model.readiness)
+    } label: {
+      MenuBarIcon(session: model.session)
+    }
+    .menuBarExtraStyle(.window)
     Settings {
       SettingsView()
+        .environmentObject(model.session)
+        .environmentObject(model.store)
+        .environmentObject(model.readiness)
     }
   }
 }

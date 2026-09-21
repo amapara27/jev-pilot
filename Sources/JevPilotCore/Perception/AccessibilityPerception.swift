@@ -7,6 +7,7 @@ import Foundation
 @MainActor
 public final class AccessibilityPerception: DesktopPerceiving {
   private var elementRegistry: [String: AXUIElement] = [:]
+  public private(set) var observedProcessIdentifier: Int32?
   private let maximumElements: Int
   private let maximumDepth: Int
 
@@ -30,6 +31,10 @@ public final class AccessibilityPerception: DesktopPerceiving {
     guard let frontmost = NSWorkspace.shared.frontmostApplication else {
       throw PerceptionError.noFrontmostApplication
     }
+    guard frontmost.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+      throw PerceptionError.controlCenterIsFrontmost
+    }
+    observedProcessIdentifier = frontmost.processIdentifier
 
     elementRegistry.removeAll(keepingCapacity: true)
     let appElement = AXUIElementCreateApplication(frontmost.processIdentifier)
@@ -60,7 +65,7 @@ public final class AccessibilityPerception: DesktopPerceiving {
     )
 
     let runningApplications = NSWorkspace.shared.runningApplications
-      .filter { $0.activationPolicy == .regular }
+      .filter { $0.activationPolicy == .regular && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
       .compactMap { application -> ApplicationState? in
         guard let name = application.localizedName else { return nil }
         return ApplicationState(

@@ -8,6 +8,28 @@ public protocol DecisionEngine: Sendable {
     state: DesktopState,
     candidates: [ActionCandidate]
   ) async throws -> ActionDecision
+  func decide(
+    goal: String, state: DesktopState, candidates: [ActionCandidate],
+    report: @escaping @Sendable (RequestMetric) -> Void
+  ) async throws -> ActionDecision
+}
+
+extension DecisionEngine {
+  /// Test and alternate providers can opt into telemetry without changing their base API.
+  public func decide(
+    goal: String, state: DesktopState, candidates: [ActionCandidate],
+    report: @escaping @Sendable (RequestMetric) -> Void
+  ) async throws -> ActionDecision {
+    let start = Date()
+    var metric = RequestMetric(latencyMilliseconds: 0, isComplete: false)
+    report(metric)
+    defer {
+      metric.latencyMilliseconds = Int(Date().timeIntervalSince(start) * 1_000)
+      metric.isComplete = true
+      report(metric)
+    }
+    return try await decide(goal: goal, state: state, candidates: candidates)
+  }
 }
 
 /// Describes configuration, transport, and response-validation failures.

@@ -30,5 +30,9 @@ let package = Package(
       name: "JevPilotCoreTests",
       dependencies: ["JevPilotCore"]
     ),
+    .testTarget(
+      name: "JevPilotAppTests",
+      dependencies: ["JevPilotApp", "JevPilotCore"]
+    ),
   ]
 )
