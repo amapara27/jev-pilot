@@ -54,6 +54,25 @@ private final class FakeSpeech: SpeechProviding {
   func emit(_ text: String, final: Bool = false) { onEvent?(.transcript(text, isFinal: final)) }
 }
 
+/// Suspends startup until a test explicitly marks this fake storage item as loaded.
+@MainActor
+private final class ControlledStorageLoader {
+  private(set) var started = false
+  private(set) var finished = false
+  private var continuation: CheckedContinuation<Void, Never>?
+
+  func load() async {
+    started = true
+    await withCheckedContinuation { continuation = $0 }
+    finished = true
+  }
+
+  func finish() {
+    continuation?.resume()
+    continuation = nil
+  }
+}
+
 @MainActor
 final class RuntimeTests: XCTestCase {
   private func controller(_ engine: FakeEngine, perception: FakePerception = .init(), executor: FakeExecutor = .init(), maximumSteps: Int = 12) -> AutomationController {
@@ -241,6 +260,65 @@ final class RuntimeTests: XCTestCase {
 
 @MainActor
 final class RunStoreTests: XCTestCase {
+  private func eventually(
+    _ predicate: @MainActor () -> Bool,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) async {
+    for _ in 0..<300 {
+      if predicate() { return }
+      try? await Task.sleep(for: .milliseconds(5))
+    }
+    XCTFail("Condition was not reached", file: file, line: line)
+  }
+
+  func testStartupWaitsForEveryStorageItemAndLoadsThemTogether() async {
+    let first = ControlledStorageLoader()
+    let second = ControlledStorageLoader()
+    let startup = StorageStartupCoordinator(loaders: [
+      { await first.load() },
+      { await second.load() },
+    ])
+
+    let task = Task { await startup.load() }
+    await eventually { first.started && second.started }
+    XCTAssertEqual(startup.phase, .loading)
+
+    first.finish()
+    await eventually { first.finished }
+    XCTAssertEqual(startup.phase, .loading)
+
+    second.finish()
+    await task.value
+    XCTAssertTrue(second.finished)
+    XCTAssertEqual(startup.phase, .ready)
+  }
+
+  func testFullHistoryStartupCompletesWithinTwoSeconds() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let url = folder.appendingPathComponent("runs.json")
+    let archive = RunArchive(url: url)
+    let records = (0..<100).map { index in
+      var record = RunRecord(command: "run \(index)")
+      record.startedAt = Date(timeIntervalSince1970: Double(index))
+      record.outcome = .completed
+      return record
+    }
+    try await archive.save(records, revision: 1)
+    let store = RunStore(url: url)
+    let startup = StorageStartupCoordinator(loaders: [{ await store.load() }])
+
+    let clock = ContinuousClock()
+    let startedAt = clock.now
+    await startup.load()
+    let elapsed = startedAt.duration(to: clock.now)
+
+    XCTAssertEqual(store.records.count, 100)
+    XCTAssertTrue(startup.isReady)
+    XCTAssertLessThan(elapsed, .seconds(2), "Loading the maximum retained history should not delay launch noticeably.")
+  }
+
   func testArchiveRecoversInterruptedRunAndPreservesCompleted() async throws {
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: folder) }

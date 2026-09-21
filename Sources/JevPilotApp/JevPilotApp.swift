@@ -8,7 +8,7 @@ struct JevPilotApp: App {
   @StateObject private var model = AppModel()
   var body: some Scene {
     Window("Jev Pilot", id: "control-center") {
-      ContentView()
+      StartupGate(startup: model.startup) { ContentView() }
         .environmentObject(model)
         .environmentObject(model.session)
         .environmentObject(model.controller)
@@ -20,15 +20,10 @@ struct JevPilotApp: App {
     .defaultSize(width: 1040, height: 730)
     .windowStyle(.hiddenTitleBar)
     .commands {
-      CommandMenu("Control") {
-        Button("Start Listening") { model.session.startListening() }
-          .keyboardShortcut("l", modifiers: [.command, .shift])
-        Button("Stop") { model.session.stop() }
-          .keyboardShortcut(".", modifiers: .command)
-      }
+      PilotCommands(startup: model.startup, session: model.session)
     }
     MenuBarExtra {
-      MenuBarPanel()
+      StartupGate(startup: model.startup) { MenuBarPanel() }
         .environmentObject(model.session)
         .environmentObject(model.controller)
         .environmentObject(model.store)
@@ -38,10 +33,30 @@ struct JevPilotApp: App {
     }
     .menuBarExtraStyle(.window)
     Settings {
-      SettingsView()
+      StartupGate(startup: model.startup) { SettingsView() }
         .environmentObject(model.session)
         .environmentObject(model.store)
         .environmentObject(model.readiness)
+    }
+  }
+}
+
+/// Hides command shortcuts until the same startup gate used by every visible surface opens.
+struct PilotCommands: Commands {
+  @ObservedObject var startup: StorageStartupCoordinator
+  let session: SessionCoordinator
+
+  var body: some Commands {
+    CommandMenu("Control") {
+      if startup.isReady {
+        Button("Start Listening") { session.startListening() }
+          .keyboardShortcut("l", modifiers: [.command, .shift])
+        Button("Stop") { session.stop() }
+          .keyboardShortcut(".", modifiers: .command)
+      } else {
+        Button("Loading…") {}
+          .disabled(true)
+      }
     }
   }
 }

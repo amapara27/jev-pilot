@@ -66,7 +66,6 @@ public final class SessionCoordinator: ObservableObject {
 
   public func startListening() {
     guard !state.isActive else { return }
-    guard controller.store.isLoaded else { state = .error("Run history is still loading."); return }
     if let error = readiness() { state = .error(error); return }
     voiceSession = true
     beginCapture()
@@ -74,7 +73,6 @@ public final class SessionCoordinator: ObservableObject {
   public func runTyped(_ command: String) {
     guard !state.isActive, !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
     if let error = readiness() { state = .error(error); return }
-    guard controller.store.isLoaded else { state = .error("Run history is still loading."); return }
     voiceSession = false
     generation = UUID()
     transcript = command

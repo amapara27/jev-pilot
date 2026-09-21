@@ -84,7 +84,6 @@ struct ListeningModeSelector: View {
 
 struct ListeningControls: View {
   @EnvironmentObject private var session: SessionCoordinator
-  @EnvironmentObject private var store: RunStore
   var compact = false
   var body: some View {
     let layout = compact ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12)) : AnyLayout(HStackLayout(spacing: 14))
@@ -98,7 +97,7 @@ struct ListeningControls: View {
           Image(systemName: session.state.isActive ? "xmark" : "arrow.up.right").font(.system(size: 10)).accessibilityHidden(true)
         }
       }.buttonStyle(PilotButtonStyle(prominent: true, destructive: session.state.isActive))
-        .disabled(!store.isLoaded).frame(maxWidth: compact ? .infinity : 205)
+        .frame(maxWidth: compact ? .infinity : 205)
         .help(session.state.isActive ? "Stop listening and cancel the run (⌘.)" : "Start listening (⇧⌘L)")
       if !compact { Spacer(minLength: 0) }
     }

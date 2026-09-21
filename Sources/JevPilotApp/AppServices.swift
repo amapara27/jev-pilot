@@ -79,6 +79,7 @@ final class DesktopTargetTracker {
 @MainActor
 final class AppModel: ObservableObject {
   let store: RunStore
+  let startup: StorageStartupCoordinator
   let controller: AutomationController
   let session: SessionCoordinator
   let readiness = Readiness()
@@ -89,6 +90,8 @@ final class AppModel: ObservableObject {
   init() {
     UserDefaults.standard.register(defaults: ["inputPrice": 0.042, "outputPrice": 0.0])
     store = RunStore()
+    let store = store
+    startup = StorageStartupCoordinator(loaders: [{ await store.load() }])
     let perception = AccessibilityPerception()
     let keyStore = KeychainAPIKeyStore()
     controller = AutomationController(perception: perception, decisionEngine: JevDecisionEngine {
@@ -107,7 +110,8 @@ final class AppModel: ObservableObject {
     session.objectWillChange.sink { [weak self] in
       Task { @MainActor in self?.updateOverlay() }
     }.store(in: &subscriptions)
-    Task { await store.load() }
+    let startup = startup
+    Task { await startup.load() }
   }
   private func updateOverlay() {
     if session.showTranscript && session.state.isActive { overlay?.show() }

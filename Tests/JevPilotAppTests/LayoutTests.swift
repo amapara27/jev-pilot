@@ -79,5 +79,6 @@ final class LayoutTests: XCTestCase {
     try await render("menu-bar", MenuBarPanel(), width: 330, height: 260)
     try await render("menu-bar-dark", MenuBarPanel(), width: 330, height: 260, dark: true)
     try await render("transcript", TranscriptHUD(session: session), width: 440, height: 90)
+    try await render("startup-loading", StartupLoadingView(), width: 780, height: 580)
   }
 }

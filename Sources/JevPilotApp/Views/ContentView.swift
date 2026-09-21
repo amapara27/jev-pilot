@@ -96,7 +96,7 @@ struct ControlView: View {
                 .accessibilityLabel("Typed command")
               Button(action: runTyped) { Image(systemName: "arrow.up.right").frame(width: 16, height: 16) }
                 .buttonStyle(PilotButtonStyle())
-                .disabled(session.state.isActive || command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.isLoaded)
+                .disabled(session.state.isActive || command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .help("Run typed command").accessibilityLabel("Run typed command")
             }
           }

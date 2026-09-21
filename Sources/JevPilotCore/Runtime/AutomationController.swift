@@ -68,7 +68,7 @@ public final class AutomationController: ObservableObject {
   /// Starting from either surface uses the same single-run boundary.
   public func run(goal: String) {
     let goal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !goal.isEmpty, store.isLoaded, !status.isActive else { return }
+    guard !goal.isEmpty, !status.isActive else { return }
     generation = UUID()
     let id = generation
     transcript = goal
