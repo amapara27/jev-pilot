@@ -6,23 +6,31 @@ import JevPilotCore
 @testable import JevPilotApp
 
 @MainActor
-private final class PreviewPerception: DesktopPerceiving {
-  func requestAccessibilityPermission(prompt: Bool) -> Bool { false }
-  func snapshot(recentActions: [ActionRecord]) throws -> DesktopState { .init() }
-}
-private struct PreviewDecision: DecisionEngine {
-  func decide(goal: String, state: DesktopState, candidates: [ActionCandidate]) async throws -> ActionDecision {
-    throw DecisionError.missingAPIKey
+private final class PreviewProbe: GoalProbing {
+  func probe(goal: String) async throws -> JevGoalProbeResult {
+    let stop = ActionCandidate(id: "stop", action: .stop(reason: "done"), criterion: "The goal is already complete.")
+    let escape = ActionCandidate(id: "escape", action: .pressKey(.escape), criterion: "Dismiss the open surface.")
+    let decision = ActionDecision(
+      candidate: escape,
+      confidence: 0.81,
+      probabilities: ["stop": 0.19, "escape": 0.81],
+      model: "jev-preview",
+      latencyMilliseconds: 184
+    )
+    return JevGoalProbeResult(
+      goal: goal,
+      desktopState: .init(activeApplication: .init(name: "Safari"), isAccessibilityTrusted: true),
+      candidates: [stop, escape],
+      decision: decision,
+      requestMetric: .init(latencyMilliseconds: 184, inputTokens: 620, outputTokens: 8)
+    )
   }
-}
-@MainActor
-private final class PreviewExecutor: ActionExecuting {
-  func execute(_ action: AutomationAction) async -> ExecutionResult { .init(succeeded: false, message: "Preview") }
 }
 @MainActor
 private final class PreviewSpeech: SpeechProviding {
   var onEvent: ((SpeechEvent) -> Void)?
-  func start() async {}
+  func prepare(preset: SpeechRecognitionPreset) async { onEvent?(.ready) }
+  func start(preset: SpeechRecognitionPreset) async { onEvent?(.ready) }
   func stop() {}
 }
 
@@ -36,8 +44,11 @@ final class LayoutTests: XCTestCase {
     let destination = URL(fileURLWithPath: output)
     try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
     let store = RunStore(inMemory: true)
-    let controller = AutomationController(perception: PreviewPerception(), decisionEngine: PreviewDecision(), executor: PreviewExecutor(), store: store)
-    let session = SessionCoordinator(controller: controller, speech: PreviewSpeech(), defaults: nil)
+    let session = SessionCoordinator(probe: PreviewProbe(), speech: PreviewSpeech(), defaults: nil)
+    session.runTyped("Dismiss the current dialog")
+    for _ in 0..<100 where session.state != .complete {
+      try await Task.sleep(for: .milliseconds(5))
+    }
     let readiness = Readiness()
     readiness.hasKey = true
     readiness.accessibility = true
@@ -48,7 +59,7 @@ final class LayoutTests: XCTestCase {
     record.requests = [.init(latencyMilliseconds: 210, inputTokens: 1650, outputTokens: 12)]
     store.upsert(record)
     func render<V: View>(_ name: String, _ view: V, width: CGFloat, height: CGFloat, dark: Bool = false) async throws {
-      let root = view.environmentObject(session).environmentObject(controller).environmentObject(store).environmentObject(readiness)
+      let root = view.environmentObject(session).environmentObject(store).environmentObject(readiness)
         .environment(\.colorScheme, dark ? .dark : .light)
         .background(dark ? Color(nsColor: .darkGray) : .white)
       let host = NSHostingView(rootView: root)

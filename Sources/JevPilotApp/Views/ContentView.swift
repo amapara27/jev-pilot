@@ -60,10 +60,10 @@ struct ContentView: View {
 /// Live state and command entry take priority; raw diagnostics remain collapsed.
 struct ControlView: View {
   @EnvironmentObject private var session: SessionCoordinator
-  @EnvironmentObject private var controller: AutomationController
   @EnvironmentObject private var store: RunStore
   @EnvironmentObject private var readiness: Readiness
   @State private var command = ""
+  @State private var expected = ""
   @State private var diagnostics = false
   @State private var debugPanel = 0
   var body: some View {
@@ -84,7 +84,7 @@ struct ControlView: View {
               Text(message).font(.callout).foregroundStyle(PilotTheme.danger).textSelection(.enabled)
             }
             ListeningControls()
-            if session.showTranscript, !session.transcript.isEmpty {
+            if !session.transcript.isEmpty {
               Text(session.transcript).font(PilotTheme.mono(13)).textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(14).background(PilotTheme.inset)
             }
@@ -101,7 +101,7 @@ struct ControlView: View {
             }
           }
         }
-        if let blocker = readiness.commandBlocker {
+        if let blocker = readiness.probeBlocker {
           HStack(alignment: .center, spacing: 12) {
             Image(systemName: "circle.lefthalf.filled").foregroundStyle(PilotTheme.muted).accessibilityHidden(true)
             Text(blocker).font(.system(size: 12)).foregroundStyle(PilotTheme.muted)
@@ -110,37 +110,58 @@ struct ControlView: View {
           }
         }
         if let error = store.errorMessage { Text(error).font(.callout).foregroundStyle(PilotTheme.danger) }
-        ConfirmationView()
         VStack(alignment: .leading, spacing: 16) {
-          SectionCaption(title: controller.currentRun == nil ? "Activity" : controller.currentRun?.outcome == nil ? "Current run" : "Last run")
+          SectionCaption(title: "Jev dry-run")
           PilotRule()
-          if let run = controller.currentRun {
+          if let result = session.probeResult {
             HStack(alignment: .top) {
-              Text(run.command).font(.system(size: 19, weight: .medium)).textSelection(.enabled)
-              Spacer(); OutcomeLabel(outcome: run.outcome)
-            }
-            if run.outcome == nil, let decision = controller.latestDecision {
-              Text(decision.candidate.action.summary).font(.callout).foregroundStyle(PilotTheme.muted)
+              Text(result.decision.candidate.action.summary).font(.system(size: 19, weight: .medium)).textSelection(.enabled)
+              Spacer()
+              Text("NO ACTION EXECUTED").font(PilotTheme.mono(9)).foregroundStyle(PilotTheme.accent)
             }
             HStack {
-              if run.outcome == nil {
-                SwiftUI.TimelineView(.periodic(from: .now, by: 1)) { context in
-                  MetricView(title: "Elapsed", value: durationLabel(context.date.timeIntervalSince(run.startedAt)))
-                }
-              } else { MetricView(title: "Duration", value: durationLabel(run.duration)) }
-              MetricView(title: "Step", value: stepLabel)
-              MetricView(title: "Actions", value: "\(run.actionCount)")
-              MetricView(title: "Decision", value: controller.latestDecision.map { "\($0.latencyMilliseconds) ms" } ?? "—")
+              MetricView(title: "Confidence", value: result.decision.confidence.formatted(.percent.precision(.fractionLength(1))))
+              MetricView(title: "Candidates", value: "\(result.candidates.count)")
+              MetricView(title: "Latency", value: "\(result.decision.latencyMilliseconds) ms")
+              MetricView(title: "Model", value: result.decision.model)
             }.padding(.vertical, 8)
-            if !run.events.isEmpty { RunEventList(events: run.events) }
-            else { Text("Observing the desktop…").font(.callout).foregroundStyle(PilotTheme.muted) }
+            VStack(alignment: .leading, spacing: 8) {
+              ForEach(result.candidates) { candidate in
+                HStack {
+                  Text(candidate.action.summary).lineLimit(2)
+                  Spacer()
+                  Text((result.decision.probabilities[candidate.id] ?? 0).formatted(.percent.precision(.fractionLength(1))))
+                    .font(PilotTheme.mono(11)).monospacedDigit()
+                }.font(.system(size: 12)).foregroundStyle(candidate.id == result.decision.candidate.id ? PilotTheme.text : PilotTheme.muted)
+              }
+            }.textSelection(.enabled)
           } else {
             HStack(alignment: .top, spacing: 16) {
               Text("—").font(PilotTheme.mono(24)).foregroundStyle(PilotTheme.muted)
               VStack(alignment: .leading, spacing: 6) {
-                Text("No runs yet").font(.system(size: 13)).foregroundStyle(PilotTheme.muted)
+                Text("No decision yet").font(.system(size: 13)).foregroundStyle(PilotTheme.muted)
+                Text("Speak or type a goal to capture one snapshot and ask Jev once.").font(.system(size: 12)).foregroundStyle(PilotTheme.muted)
               }
             }.padding(.vertical, 16)
+          }
+        }
+        Surface {
+          VStack(alignment: .leading, spacing: 14) {
+            SectionCaption(title: "Transcription accuracy")
+            TextField("Expected phrase", text: $expected).textFieldStyle(.plain).font(PilotTheme.mono(12))
+              .padding(12).background(PilotTheme.inset)
+            if !expected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !session.transcript.isEmpty {
+              let score = TranscriptionAccuracy.compare(reference: expected, transcript: session.transcript)
+              HStack {
+                MetricView(title: "WER", value: score.wordErrorRate.formatted(.percent.precision(.fractionLength(1))))
+                MetricView(title: "Substitutions", value: "\(score.substitutions)")
+                MetricView(title: "Insertions", value: "\(score.insertions)")
+                MetricView(title: "Deletions", value: "\(score.deletions)")
+              }
+            } else {
+              Text("Enter what you plan to say, then compare it with the final transcript.")
+                .font(.system(size: 12)).foregroundStyle(PilotTheme.muted)
+            }
           }
         }
         DisclosureGroup("Live diagnostics", isExpanded: $diagnostics) {
@@ -151,9 +172,10 @@ struct ControlView: View {
               }.labelsHidden()
               Group {
                 switch debugPanel {
-                case 1: JSONDebugView(title: "Desktop state", value: controller.latestState)
-                case 2: ActionsView(actions: controller.availableActions, decision: controller.latestDecision)
-                default: TimelineView(events: controller.debugEvents)
+                case 1: JSONDebugView(title: "Desktop state", value: session.probeResult?.desktopState)
+                case 2: ActionsView(actions: session.probeResult?.candidates ?? [], decision: session.probeResult?.decision)
+                default: Text("Probe results are session-only and never enter saved run history.")
+                  .font(.callout).foregroundStyle(PilotTheme.muted)
                 }
               }.frame(height: 300)
             }.padding(.top, 12)
@@ -165,18 +187,17 @@ struct ControlView: View {
   private var headline: String {
     switch session.state {
     case .stopped: "Ready."
+    case .preparingModel: "Preparing."
     case .listening: "Listening."
-    case .executing: "On it."
-    case .awaitingConfirmation: "Your call."
+    case .askingJev: "Asking Jev."
+    case .complete: "Complete."
     case .error: "Let’s reconnect."
     }
   }
-  private var stepLabel: String {
-    if case .running(let step) = controller.status { return "\(step)/12" }
-    if let pending = controller.pendingConfirmation { return "\(pending.nextStep - 1)/12" }
-    return "—"
+  private func runTyped() {
+    session.runTyped(command)
+    command = ""
   }
-  private func runTyped() { session.runTyped(command) }
 }
 
 struct OutcomeLabel: View {

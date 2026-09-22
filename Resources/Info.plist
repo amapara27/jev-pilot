@@ -22,7 +22,5 @@
     <string>14.0</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Jev Pilot uses the microphone to transcribe voice commands locally.</string>
-    <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Jev Pilot uses on-device speech recognition to transcribe voice commands.</string>
 </dict>
 </plist>

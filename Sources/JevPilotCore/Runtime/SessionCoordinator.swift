@@ -1,187 +1,195 @@
-// Shares listening and execution state across the window, menu bar, and transcript panel.
+// Shares local transcription and one-shot Jev probing state across every app surface.
 import Combine
 import Foundation
 
 public enum ListeningMode: String, CaseIterable, Identifiable, Sendable {
   case single, continuous
-  public var id: Self { self }
-  public var title: String { self == .single ? "Single command" : "Continuous" }
+  public var id: Self { self }  public var title: String { self == .single ? "Single command" : "Continuous" }
 }
 
-/// Coordinates voice submission without changing the core safety policy.
+/// Coordinates capture and probing while generation checks isolate every late callback.
 @MainActor
 public final class SessionCoordinator: ObservableObject {
   public enum State: Equatable {
-    case stopped, listening, executing, awaitingConfirmation, error(String)
+    case stopped
+    case preparingModel(progress: Double?)
+    case listening
+    case askingJev
+    case complete
+    case error(String)
+
     public var label: String {
       switch self {
       case .stopped: "Ready when you are"
+      case .preparingModel(let progress):
+        progress.map { "Preparing model · \(Int($0 * 100))%" } ?? "Preparing model"
       case .listening: "Listening"
-      case .executing: "Working"
-      case .awaitingConfirmation: "Needs your confirmation"
+      case .askingJev: "Asking Jev"
+      case .complete: "Complete"
       case .error(let message): message
       }
     }
     public var isActive: Bool {
-      switch self { case .listening, .executing, .awaitingConfirmation: true; default: false }
+      switch self {
+      case .preparingModel, .listening, .askingJev: true
+      case .stopped, .complete, .error: false
+      }
     }
   }
+
   @Published public private(set) var state: State = .stopped
   @Published public private(set) var transcript = ""
+  @Published public private(set) var probeResult: JevGoalProbeResult?
   @Published public var mode: ListeningMode {
     didSet { defaults?.set(mode.rawValue, forKey: "listeningMode") }
   }
   @Published public var showTranscript: Bool {
     didSet { defaults?.set(showTranscript, forKey: "showTranscript") }
   }
-  public let controller: AutomationController
+  @Published public var speechPreset: SpeechRecognitionPreset {
+    didSet { defaults?.set(speechPreset.rawValue, forKey: "speechPreset") }
+  }
+
   private let speech: any SpeechProviding
+  private let probe: any GoalProbing
   private let defaults: UserDefaults?
-  private let prepareTarget: @MainActor (Int32?) async throws -> Void
-  private let readiness: @MainActor () -> String?
-  private let silenceMilliseconds: Int
   private var generation = UUID()
   private var committed = false
   private var voiceSession = false
-  private var silenceTask: Task<Void, Never>?
   private var workTask: Task<Void, Never>?
-  private var subscription: AnyCancellable?
 
   public init(
-    controller: AutomationController, speech: any SpeechProviding, defaults: UserDefaults? = .standard,
-    silenceMilliseconds: Int = 800,
-    readiness: @escaping @MainActor () -> String? = { nil },
-    prepareTarget: @escaping @MainActor (Int32?) async throws -> Void = { _ in }
+    probe: any GoalProbing,
+    speech: any SpeechProviding,
+    defaults: UserDefaults? = .standard
   ) {
-    self.controller = controller
+    self.probe = probe
     self.speech = speech
     self.defaults = defaults
-    self.silenceMilliseconds = silenceMilliseconds
-    self.readiness = readiness
-    self.prepareTarget = prepareTarget
     mode = ListeningMode(rawValue: defaults?.string(forKey: "listeningMode") ?? "") ?? .single
     showTranscript = defaults?.bool(forKey: "showTranscript") ?? false
-    subscription = controller.$status.sink { [weak self] status in self?.controllerChanged(status) }
+    speechPreset = SpeechRecognitionPreset(
+      rawValue: defaults?.string(forKey: "speechPreset") ?? ""
+    ) ?? .balanced320
+  }
+
+  /// Downloads or opens the selected model without accessing the microphone.
+  public func prepareSpeechModel() {
+    guard !state.isActive else { return }
+    invalidate(clearTranscript: false)
+    let id = generation
+    state = .preparingModel(progress: nil)
+    speech.onEvent = { [weak self] event in self?.receive(event, generation: id, preparationOnly: true) }
+    workTask = Task { [weak self] in
+      guard let self else { return }
+      await self.speech.prepare(preset: self.speechPreset)
+    }
   }
 
   public func startListening() {
     guard !state.isActive else { return }
-    if let error = readiness() { state = .error(error); return }
     voiceSession = true
     beginCapture()
   }
+
+  /// Typed text bypasses STT but uses the identical one-shot observation and decision path.
   public func runTyped(_ command: String) {
-    guard !state.isActive, !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-    if let error = readiness() { state = .error(error); return }
+    guard !state.isActive,
+      !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    invalidate(clearTranscript: false)
     voiceSession = false
-    generation = UUID()
     transcript = command
-    committed = false
+    probeResult = nil
     submit(command, generation: generation)
   }
+
+  /// Manual Stop cancels model, audio, and Jev work and never commits partial speech.
   public func stop() {
+    invalidate(clearTranscript: state == .listening || isPreparing)
+    voiceSession = false
+    state = .stopped
+  }
+
+  private var isPreparing: Bool {
+    if case .preparingModel = state { return true }
+    return false
+  }
+
+  private func invalidate(clearTranscript: Bool) {
     generation = UUID()
-    voiceSession = false
-    silenceTask?.cancel()
     workTask?.cancel()
+    workTask = nil
     speech.stop()
-    controller.cancel()
-    transcript = ""
-    state = .stopped
-  }
-  public func reject() {
-    voiceSession = false
-    controller.rejectPendingAction()
-    state = .stopped
-  }
-  public func confirm() {
-    guard state == .awaitingConfirmation else { return }
-    state = .executing
-    let id = generation
-    let pid = controller.latestState?.activeApplication?.processIdentifier
-    workTask = Task { [weak self] in
-      guard let self else { return }
-      do {
-        try await self.prepareTarget(pid)
-        guard self.generation == id, !Task.isCancelled else { return }
-        self.controller.confirmPendingAction()
-      } catch {
-        guard self.generation == id else { return }
-        self.stop()
-        self.state = .error(error.localizedDescription)
-      }
-    }
+    committed = false
+    if clearTranscript { transcript = "" }
   }
 
   private func beginCapture() {
-    generation = UUID()
+    invalidate(clearTranscript: true)
     let id = generation
-    committed = false
-    transcript = ""
-    state = .listening
-    speech.onEvent = { [weak self] event in self?.receive(event, generation: id) }
+    probeResult = nil
+    state = .preparingModel(progress: nil)
+    speech.onEvent = { [weak self] event in self?.receive(event, generation: id, preparationOnly: false) }
     workTask = Task { [weak self] in
-      guard let self, self.generation == id, !Task.isCancelled else { return }
-      await self.speech.start()
+      guard let self else { return }
+      await self.speech.start(preset: self.speechPreset)
     }
   }
-  private func receive(_ event: SpeechEvent, generation id: UUID) {
-    guard id == generation, state == .listening, !committed else { return }
+
+  private func receive(
+    _ event: SpeechEvent,
+    generation id: UUID,
+    preparationOnly: Bool
+  ) {
+    guard id == generation, !committed else { return }
     switch event {
+    case .preparing(let progress):
+      state = .preparingModel(progress: progress)
+    case .ready:
+      state = preparationOnly ? .complete : .listening
     case .failed(let message):
-      stop()
+      invalidate(clearTranscript: false)
       state = .error(message)
     case .transcript(let text, let isFinal):
-      let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-      let changed = text != transcript
+      guard !preparationOnly, state == .listening else { return }
       transcript = text
-      if isFinal, !text.isEmpty { submit(text, generation: id); return }
-      if isFinal, text.isEmpty {
+      guard isFinal else { return }
+      let goal = text.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !goal.isEmpty else {
         stop()
         return
       }
-      guard changed else { return }
-      silenceTask?.cancel()
-      guard !text.isEmpty else { return }
-      silenceTask = Task { [weak self] in
-        guard let self else { return }
-        do { try await Task.sleep(for: .milliseconds(self.silenceMilliseconds)) } catch { return }
-        self.submit(text, generation: id)
-      }
+      // Preserve the model's words verbatim, removing only surrounding whitespace.
+      transcript = goal
+      submit(goal, generation: id)
     }
   }
-  private func submit(_ command: String, generation id: UUID) {
+
+  private func submit(_ goal: String, generation id: UUID) {
     guard generation == id, !committed else { return }
     committed = true
-    silenceTask?.cancel()
     speech.stop()
-    state = .executing
+    state = .askingJev
     workTask = Task { [weak self] in
       guard let self else { return }
       do {
-        try await self.prepareTarget(nil)
+        let result = try await self.probe.probe(goal: goal)
         guard self.generation == id, !Task.isCancelled else { return }
-        self.controller.run(goal: command)
+        self.probeResult = result
+        self.committed = false
+        if self.voiceSession, self.mode == .continuous {
+          self.beginCapture()
+        } else {
+          self.voiceSession = false
+          self.state = .complete
+        }
+      } catch is CancellationError {
       } catch {
         guard self.generation == id else { return }
-        self.stop()
+        self.voiceSession = false
+        self.committed = false
         self.state = .error(error.localizedDescription)
       }
-    }
-  }
-  private func controllerChanged(_ status: AutomationController.Status) {
-    switch status {
-    case .running: state = .executing
-    case .awaitingConfirmation: state = .awaitingConfirmation
-    case .completed:
-      if voiceSession && mode == .continuous { beginCapture() }
-      else { state = .stopped; voiceSession = false }
-    case .failed(let message), .blocked(let message):
-      voiceSession = false
-      speech.stop()
-      state = .error(message)
-    case .stopped, .rejected: voiceSession = false; state = .stopped
-    case .idle: break
     }
   }
 }

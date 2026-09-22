@@ -4,7 +4,6 @@ import ApplicationServices
 import AVFoundation
 import Combine
 import JevPilotCore
-import Speech
 import SwiftUI
 
 /// Reads permission state without prompting at app launch.
@@ -12,17 +11,15 @@ import SwiftUI
 final class Readiness: ObservableObject {
   @Published var accessibility = false
   @Published var microphone = AVAuthorizationStatus.notDetermined
-  @Published var speech = SFSpeechRecognizerAuthorizationStatus.notDetermined
   @Published var hasKey = false
   func refresh() {
     accessibility = AXIsProcessTrusted()
     microphone = AVCaptureDevice.authorizationStatus(for: .audio)
-    speech = SFSpeechRecognizer.authorizationStatus()
     hasKey = (try? KeychainAPIKeyStore().loadFromKeychainOrEnvironment())?.isEmpty == false
   }
-  var commandBlocker: String? {
-    if !hasKey { return "Add your TypeSafe API key in Settings to begin." }
-    if !accessibility { return "Enable Accessibility in System Settings to control your desktop." }
+  var probeBlocker: String? {
+    if !hasKey { return "Add your TypeSafe API key in Settings to ask Jev." }
+    if !accessibility { return "Enable Accessibility to give Jev a live desktop snapshot." }
     return nil
   }
   func openPermission(_ pane: String) {
@@ -80,7 +77,6 @@ final class DesktopTargetTracker {
 final class AppModel: ObservableObject {
   let store: RunStore
   let startup: StorageStartupCoordinator
-  let controller: AutomationController
   let session: SessionCoordinator
   let readiness = Readiness()
   let target = DesktopTargetTracker()
@@ -94,17 +90,18 @@ final class AppModel: ObservableObject {
     startup = StorageStartupCoordinator(loaders: [{ await store.load() }])
     let perception = AccessibilityPerception()
     let keyStore = KeychainAPIKeyStore()
-    controller = AutomationController(perception: perception, decisionEngine: JevDecisionEngine {
-      try keyStore.loadFromKeychainOrEnvironment()
-    }, executor: MacOSActionExecutor(perception: perception), store: store)
     let readiness = readiness
     let target = target
-    let controller = controller
-    session = SessionCoordinator(controller: controller, speech: LocalSpeechRecognizer(), readiness: {
-      readiness.refresh()
-      controller.pricing = TokenPricing(inputPerMillion: UserDefaults.standard.double(forKey: "inputPrice"), outputPerMillion: UserDefaults.standard.double(forKey: "outputPrice"))
-      return readiness.commandBlocker
-    }, prepareTarget: { pid in try await target.prepare(processIdentifier: pid) })
+    let probe = JevGoalProbe(
+      perception: perception,
+      decisionEngine: JevDecisionEngine { try keyStore.loadFromKeychainOrEnvironment() },
+      readiness: {
+        readiness.refresh()
+        return readiness.probeBlocker
+      },
+      prepareTarget: { try await target.prepare(processIdentifier: nil) }
+    )
+    session = SessionCoordinator(probe: probe, speech: FluidAudioSpeechRecognizer())
     readiness.refresh()
     overlay = TranscriptPanel(session: session)
     session.objectWillChange.sink { [weak self] in

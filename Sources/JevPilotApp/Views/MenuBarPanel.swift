@@ -10,9 +10,10 @@ struct MenuBarIcon: View {
   }
   private var icon: String {
     switch session.state {
+    case .preparingModel: "arrow.down.circle"
     case .listening: "mic.fill"
-    case .executing: "waveform"
-    case .awaitingConfirmation: "exclamationmark.circle"
+    case .askingJev: "waveform"
+    case .complete: "checkmark.circle"
     case .error: "exclamationmark.triangle"
     case .stopped: "waveform.and.mic"
     }
@@ -21,7 +22,6 @@ struct MenuBarIcon: View {
 
 struct MenuBarPanel: View {
   @EnvironmentObject private var session: SessionCoordinator
-  @EnvironmentObject private var controller: AutomationController
   @EnvironmentObject private var readiness: Readiness
   @Environment(\.openWindow) private var openWindow
   var body: some View {
@@ -37,13 +37,12 @@ struct MenuBarPanel: View {
           Text(message).font(.caption).foregroundStyle(PilotTheme.danger).fixedSize(horizontal: false, vertical: true)
         }
         ListeningControls(compact: true)
-        if session.state.isActive, !session.transcript.isEmpty {
+        if !session.transcript.isEmpty {
           Text(session.transcript).font(.callout).lineLimit(3)
         }
-        if controller.status.isActive, let decision = controller.latestDecision {
+        if let decision = session.probeResult?.decision {
           Text(decision.candidate.action.summary).font(.caption).foregroundStyle(PilotTheme.muted).lineLimit(2)
         }
-        ConfirmationView()
         PilotRule()
         Button {
           openWindow(id: "control-center")

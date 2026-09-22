@@ -43,13 +43,20 @@ struct SettingsView: View {
         SettingsSection(title: "02 / Permissions") {
           permissionRow("Accessibility", status: readiness.accessibility ? "Allowed" : "Required", pane: "Privacy_Accessibility")
           permissionRow("Microphone", status: readiness.microphone == .authorized ? "Allowed" : readiness.microphone == .notDetermined ? "Not requested" : "Denied", pane: "Privacy_Microphone")
-          permissionRow("Speech recognition", status: readiness.speech == .authorized ? "Allowed" : readiness.speech == .notDetermined ? "Not requested" : "Denied", pane: "Privacy_SpeechRecognition")
           Button("Refresh status") { readiness.refresh() }.buttonStyle(PilotButtonStyle())
         }
         SettingsSection(title: "03 / Voice") {
           ListeningModeSelector().frame(width: 260)
+          Picker("Parakeet EOU model", selection: $session.speechPreset) {
+            ForEach(SpeechRecognitionPreset.allCases) { preset in Text(preset.title).tag(preset) }
+          }.frame(width: 300).disabled(session.state.isActive)
+          HStack {
+            Button("Prepare Model") { session.prepareSpeechModel() }
+              .buttonStyle(PilotButtonStyle(prominent: true)).disabled(session.state.isActive)
+            Text(modelStatus).font(PilotTheme.mono(10)).foregroundStyle(PilotTheme.muted)
+          }
           Toggle("Show live transcript overlay", isOn: $session.showTranscript).toggleStyle(.checkbox).font(.system(size: 13))
-          note("Runs automatically after speech. Continuous mode listens again after each run.")
+          note("English-only Parakeet EOU. Models are cached under ~/Library/Application Support/FluidAudio; cached transcription stays local and offline.")
         }
         SettingsSection(title: "04 / Estimated pricing", trailing: "USD / MILLION TOKENS") {
           HStack(spacing: 20) {
@@ -82,6 +89,10 @@ struct SettingsView: View {
   }
   private func note(_ text: String) -> some View {
     Text(text).font(.system(size: 12)).foregroundStyle(PilotTheme.muted).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+  }
+  private var modelStatus: String {
+    if case .preparingModel = session.state { return session.state.label.uppercased() }
+    return session.speechPreset.isCached ? "READY IN LOCAL CACHE" : "DOWNLOAD REQUIRED"
   }
   private func rateField(_ title: String, text: Binding<String>) -> some View {
     VStack(alignment: .leading, spacing: 8) {

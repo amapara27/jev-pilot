@@ -20,7 +20,12 @@ struct StatusIndicator: View {
     }.accessibilityElement(children: .combine)
   }
   private var color: Color {
-    switch state { case .listening, .executing: PilotTheme.accent; case .awaitingConfirmation: .orange; case .error: PilotTheme.danger; case .stopped: PilotTheme.muted }
+    switch state {
+    case .preparingModel, .listening, .askingJev: PilotTheme.accent
+    case .complete: PilotTheme.signal
+    case .error: PilotTheme.danger
+    case .stopped: PilotTheme.muted
+    }
   }
   private var label: String {
     switch state { case .error: "Needs attention"; case .stopped: "Standby"; default: state.label }
@@ -35,27 +40,6 @@ struct MetricView: View {
       Text(title.uppercased()).font(PilotTheme.mono(10)).foregroundStyle(PilotTheme.muted).tracking(0.7)
       Text(value).font(PilotTheme.mono(23, weight: .regular)).foregroundStyle(PilotTheme.text).monospacedDigit()
     }.frame(maxWidth: .infinity, alignment: .leading)
-  }
-}
-
-struct ConfirmationView: View {
-  @EnvironmentObject private var session: SessionCoordinator
-  @EnvironmentObject private var controller: AutomationController
-  var body: some View {
-    if let pending = controller.pendingConfirmation {
-      VStack(alignment: .leading, spacing: 12) {
-        Label("Confirmation required", systemImage: "hand.raised").font(.headline)
-        Text(pending.decision.candidate.action.summary).font(.callout.weight(.medium))
-        Text(pending.assessment.reason).font(.callout).foregroundStyle(PilotTheme.muted)
-        HStack {
-          Button("Reject", role: .cancel) { session.reject() }.buttonStyle(PilotButtonStyle())
-          Button("Allow action") { session.confirm() }.buttonStyle(PilotButtonStyle(prominent: true))
-        }.disabled(session.state != .awaitingConfirmation)
-      }.padding(18).frame(maxWidth: .infinity, alignment: .leading)
-        .background(PilotTheme.surface)
-        .overlay(alignment: .leading) { Rectangle().fill(.orange).frame(width: 3) }
-        .accessibilityElement(children: .contain)
-    }
   }
 }
 

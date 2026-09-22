@@ -1,12 +1,17 @@
 // Exercises cancellation, confirmation, speech boundaries, and local history without desktop effects.
 import XCTest
+import AVFoundation
 @testable import JevPilotCore
 
 @MainActor
 private final class FakePerception: DesktopPerceiving {
   var state = DesktopState(activeApplication: .init(name: "Editor", bundleIdentifier: "test.editor", processIdentifier: 123), isAccessibilityTrusted: true)
+  var snapshotCalls = 0
   func requestAccessibilityPermission(prompt: Bool) -> Bool { true }
-  func snapshot(recentActions: [ActionRecord]) throws -> DesktopState { state }
+  func snapshot(recentActions: [ActionRecord]) throws -> DesktopState {
+    snapshotCalls += 1
+    return state
+  }
 }
 
 @MainActor
@@ -47,11 +52,97 @@ private actor FakeEngine: DecisionEngine {
 @MainActor
 private final class FakeSpeech: SpeechProviding {
   var onEvent: ((SpeechEvent) -> Void)?
+  var preparations: [SpeechRecognitionPreset] = []
+  var presets: [SpeechRecognitionPreset] = []
   var starts = 0
   var stops = 0
-  func start() async { starts += 1 }
+  func prepare(preset: SpeechRecognitionPreset) async { preparations.append(preset) }
+  func start(preset: SpeechRecognitionPreset) async {
+    starts += 1
+    presets.append(preset)
+    onEvent?(.ready)
+  }
   func stop() { stops += 1 }
   func emit(_ text: String, final: Bool = false) { onEvent?(.transcript(text, isFinal: final)) }
+}
+
+private actor FakeStreamingSpeechEngine: StreamingSpeechEngine {
+  var prepared: [SpeechRecognitionPreset] = []
+  var processedSamples: [Float] = []
+  var partial: (@Sendable (String) -> Void)?
+  var eou: (@Sendable (String) -> Void)?
+  func prepare(
+    preset: SpeechRecognitionPreset,
+    progress: @escaping @Sendable (Double) -> Void
+  ) async throws {
+    prepared.append(preset)
+    progress(0.5)
+    progress(1)
+  }
+  func configure(
+    partial: @escaping @Sendable (String) -> Void,
+    eou: @escaping @Sendable (String) -> Void
+  ) async throws {
+    self.partial = partial
+    self.eou = eou
+  }
+  func process(_ buffer: AVAudioPCMBuffer) async throws {
+    processedSamples.append(buffer.floatChannelData?[0][0] ?? -1)
+  }
+  func cancel() async {}
+  func emitPartial(_ text: String) { partial?(text) }
+  func emitFinal(_ text: String) { eou?(text) }
+  func snapshot() -> ([SpeechRecognitionPreset], [Float]) { (prepared, processedSamples) }
+}
+
+@MainActor
+private final class FakeAudioSource: SpeechAudioSource {
+  var permission = true
+  var starts = 0
+  private var handler: (@Sendable (AVAudioPCMBuffer) -> Void)?
+  func requestPermission() async -> Bool { permission }
+  func start(onBuffer: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {
+    starts += 1
+    handler = onBuffer
+  }
+  func stop() { handler = nil }
+  func emit(_ sample: Float) {
+    let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+    let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1)!
+    buffer.frameLength = 1
+    buffer.floatChannelData?[0][0] = sample
+    handler?(buffer)
+  }
+}
+
+private final class TapSampleProbe: @unchecked Sendable {
+  private let lock = NSLock()
+  private var samples: [Float] = []
+  func append(_ sample: Float) { lock.withLock { samples.append(sample) } }
+  func snapshot() -> [Float] { lock.withLock { samples } }
+}
+
+private final class TapBlockBox: @unchecked Sendable {
+  let block: AVAudioNodeTapBlock
+  init(_ block: @escaping AVAudioNodeTapBlock) { self.block = block }
+}
+
+@MainActor
+private final class FakeProbe: GoalProbing {
+  var goals: [String] = []
+  var continuation: CheckedContinuation<Void, Never>?
+  var delayed = false
+  var error: Error?
+  func release() { continuation?.resume(); continuation = nil }
+  func probe(goal: String) async throws -> JevGoalProbeResult {
+    goals.append(goal)
+    if delayed { await withCheckedContinuation { continuation = $0 } }
+    if let error { throw error }
+    let state = DesktopState(activeApplication: .init(name: "Editor"), isAccessibilityTrusted: true)
+    let candidate = ActionCandidate(id: "STOP", action: .stop(reason: "done"), criterion: "Stop")
+    let decision = ActionDecision(candidate: candidate, confidence: 1, probabilities: [candidate.id: 1], model: "fake", latencyMilliseconds: 7)
+    return JevGoalProbeResult(goal: goal, desktopState: state, candidates: [candidate], decision: decision)
+  }
 }
 
 /// Suspends startup until a test explicitly marks this fake storage item as loaded.
@@ -168,54 +259,102 @@ final class RuntimeTests: XCTestCase {
     XCTAssertEqual(failing.currentRun?.actionCount, 0)
   }
 
-  func testFinalAndSilenceDoNotSubmitTwice() async {
-    let engine = FakeEngine()
-    let runtime = controller(engine)
+  func testFinalCommitsExactlyOnceAndPreservesGoal() async {
+    let probe = FakeProbe()
     let speech = FakeSpeech()
-    let session = SessionCoordinator(controller: runtime, speech: speech, defaults: nil, silenceMilliseconds: 20)
+    let session = SessionCoordinator(probe: probe, speech: speech, defaults: nil)
     session.startListening()
     await eventually { speech.starts == 1 }
-    speech.emit("switch to Safari")
-    speech.emit("switch to Safari", final: true)
-    speech.emit("switch to Safari", final: true)
-    await eventually { runtime.currentRun?.outcome == .completed }
-    try? await Task.sleep(for: .milliseconds(35))
-    let calls = await engine.calls
-    XCTAssertEqual(calls, 1)
-    XCTAssertEqual(session.state, .stopped)
-    XCTAssertEqual(runtime.store.records.count, 1)
+    speech.emit("  switch to Safari  ")
+    speech.emit("  switch to Safari  ", final: true)
+    speech.emit("late duplicate", final: true)
+    await eventually { session.state == .complete }
+    XCTAssertEqual(probe.goals, ["switch to Safari"])
+    XCTAssertEqual(session.transcript, "switch to Safari")
   }
 
-  func testSilenceSubmitsWithoutFinalResult() async {
-    let runtime = controller(FakeEngine())
+  func testFluidAudioAdapterPreparesBeforeCaptureAndProcessesBuffersInOrder() async {
+    let engine = FakeStreamingSpeechEngine()
+    let audio = FakeAudioSource()
+    let recognizer = FluidAudioSpeechRecognizer(engine: engine, audioSource: audio)
+    var events: [String] = []
+    recognizer.onEvent = { event in
+      switch event {
+      case .transcript(let text, let final): events.append(final ? "final:\(text)" : "partial:\(text)")
+      case .ready: events.append("ready")
+      case .preparing: break
+      case .failed(let message): events.append("failed:\(message)")
+      }
+    }
+    await recognizer.start(preset: .fast160)
+    XCTAssertEqual(audio.starts, 1)
+    audio.emit(1)
+    audio.emit(2)
+    audio.emit(3)
+    for _ in 0..<100 {
+      if await engine.snapshot().1.count == 3 { break }
+      try? await Task.sleep(for: .milliseconds(2))
+    }
+    let snapshot = await engine.snapshot()
+    XCTAssertEqual(snapshot.0, [.fast160])
+    XCTAssertEqual(snapshot.1, [1, 2, 3])
+    await engine.emitPartial("hello")
+    await engine.emitFinal("hello world")
+    await Task.yield()
+    XCTAssertTrue(events.contains("ready"))
+    XCTAssertTrue(events.contains("partial:hello"))
+    XCTAssertTrue(events.contains("final:hello world"))
+    recognizer.stop()
+  }
+
+  func testAudioTapHandlerRunsOutsideMainActor() async {
+    let probe = TapSampleProbe()
+    let tap = TapBlockBox(makeAudioTapHandler { buffer in
+      probe.append(buffer.floatChannelData?[0][0] ?? -1)
+    })
+    let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+    let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1)!
+    buffer.frameLength = 1
+    buffer.floatChannelData?[0][0] = 42
+    DispatchQueue.global().async {
+      tap.block(buffer, AVAudioTime(sampleTime: 0, atRate: 16_000))
+    }
+    await eventually { probe.snapshot() == [42] }
+  }
+
+  func testPartialNeverSubmitsAndStopDiscardsIt() async {
+    let probe = FakeProbe()
     let speech = FakeSpeech()
-    let session = SessionCoordinator(controller: runtime, speech: speech, defaults: nil, silenceMilliseconds: 10)
+    let session = SessionCoordinator(probe: probe, speech: speech, defaults: nil)
     session.startListening()
     speech.emit("switch to Safari")
-    await eventually { runtime.currentRun?.outcome == .completed }
-    XCTAssertEqual(runtime.transcript, "switch to Safari")
+    try? await Task.sleep(for: .milliseconds(30))
+    XCTAssertTrue(probe.goals.isEmpty)
+    session.stop()
+    XCTAssertEqual(session.transcript, "")
   }
 
   func testStopDiscardsPartialAndPreviousCaptureCallbacks() async {
-    let runtime = controller(FakeEngine())
+    let probe = FakeProbe()
     let speech = FakeSpeech()
-    let session = SessionCoordinator(controller: runtime, speech: speech, defaults: nil, silenceMilliseconds: 20)
+    let session = SessionCoordinator(probe: probe, speech: speech, defaults: nil)
     session.startListening()
+    await eventually { session.state == .listening }
     let oldCallback = speech.onEvent
     speech.emit("partial")
     session.stop()
     session.startListening()
     oldCallback?(.transcript("late final", isFinal: true))
-    try? await Task.sleep(for: .milliseconds(35))
-    XCTAssertNil(runtime.currentRun)
+    try? await Task.sleep(for: .milliseconds(30))
+    XCTAssertTrue(probe.goals.isEmpty)
     XCTAssertEqual(session.state, .listening)
     session.stop()
   }
 
   func testContinuousResumesOnlyAfterSuccess() async {
-    let runtime = controller(FakeEngine())
+    let probe = FakeProbe()
     let speech = FakeSpeech()
-    let session = SessionCoordinator(controller: runtime, speech: speech, defaults: nil)
+    let session = SessionCoordinator(probe: probe, speech: speech, defaults: nil)
     session.mode = .continuous
     session.startListening()
     await eventually { speech.starts == 1 }
@@ -226,35 +365,105 @@ final class RuntimeTests: XCTestCase {
     XCTAssertEqual(session.state, .stopped)
   }
 
-  func testContinuousPausesForConfirmationAndDoesNotResumeAfterRejection() async {
-    let runtime = controller(FakeEngine(.enter))
+  func testTypedGoalIsPassedUnchangedAndCreatesNoRunRecord() async {
+    let probe = FakeProbe()
     let speech = FakeSpeech()
-    let session = SessionCoordinator(controller: runtime, speech: speech, defaults: nil)
-    session.mode = .continuous
-    session.startListening()
-    await eventually { speech.starts == 1 }
-    speech.emit("press Return", final: true)
-    await eventually { session.state == .awaitingConfirmation }
-    XCTAssertEqual(speech.starts, 1)
-    session.reject()
-    XCTAssertEqual(session.state, .stopped)
-    XCTAssertEqual(runtime.currentRun?.outcome, .rejected)
+    let session = SessionCoordinator(probe: probe, speech: speech, defaults: nil)
+    session.runTyped("Preserve THIS punctuation!")
+    await eventually { session.state == .complete }
+    XCTAssertEqual(probe.goals, ["Preserve THIS punctuation!"])
+    XCTAssertEqual(session.transcript, "Preserve THIS punctuation!")
   }
 
-  func testReadinessAndTargetFailureNeverCallProvider() async {
-    let engine = FakeEngine()
-    let runtime = controller(engine)
+  func testPrepareUsesSelectedPresetAndSurfacesProgress() async {
+    let probe = FakeProbe()
     let speech = FakeSpeech()
-    let blocked = SessionCoordinator(controller: runtime, speech: speech, defaults: nil, readiness: { "Missing key" })
-    blocked.startListening()
-    XCTAssertEqual(blocked.state, .error("Missing key"))
-    XCTAssertEqual(speech.starts, 0)
-    let targetFailure = SessionCoordinator(controller: runtime, speech: speech, defaults: nil, prepareTarget: { _ in throw CocoaError(.fileNoSuchFile) })
-    targetFailure.runTyped("switch to Safari")
-    await eventually { if case .error = targetFailure.state { true } else { false } }
-    let calls = await engine.calls
-    XCTAssertEqual(calls, 0)
-    XCTAssertNil(runtime.currentRun)
+    let session = SessionCoordinator(probe: probe, speech: speech, defaults: nil)
+    session.speechPreset = .slow1280
+    session.prepareSpeechModel()
+    await eventually { speech.preparations == [.slow1280] }
+    speech.onEvent?(.preparing(progress: 0.5))
+    XCTAssertEqual(session.state, .preparingModel(progress: 0.5))
+    speech.onEvent?(.ready)
+    XCTAssertEqual(session.state, .complete)
+  }
+
+  func testPreparationFailureAndCancelledLoadCannotOverwriteState() async {
+    let speech = FakeSpeech()
+    let session = SessionCoordinator(probe: FakeProbe(), speech: speech, defaults: nil)
+    session.prepareSpeechModel()
+    let cancelledCallback = speech.onEvent
+    session.stop()
+    cancelledCallback?(.preparing(progress: 0.9))
+    cancelledCallback?(.ready)
+    XCTAssertEqual(session.state, .stopped)
+
+    session.prepareSpeechModel()
+    speech.onEvent?(.failed("download failed"))
+    XCTAssertEqual(session.state, .error("download failed"))
+  }
+
+  func testPresetChangeAppliesToNextCaptureAndRejectsPriorFinal() async {
+    let speech = FakeSpeech()
+    let probe = FakeProbe()
+    let session = SessionCoordinator(probe: probe, speech: speech, defaults: nil)
+    session.speechPreset = .fast160
+    session.startListening()
+    await eventually { session.state == .listening }
+    let fastCallback = speech.onEvent
+    session.stop()
+    session.speechPreset = .slow1280
+    session.startListening()
+    await eventually { speech.starts == 2 }
+    fastCallback?(.transcript("stale", isFinal: true))
+    XCTAssertEqual(speech.presets, [.fast160, .slow1280])
+    XCTAssertTrue(probe.goals.isEmpty)
+    session.stop()
+  }
+
+  func testProbeFailureKeepsFinalTranscriptVisible() async {
+    let probe = FakeProbe()
+    probe.error = CocoaError(.fileNoSuchFile)
+    let session = SessionCoordinator(probe: probe, speech: FakeSpeech(), defaults: nil)
+    session.runTyped("inspect this")
+    await eventually { if case .error = session.state { true } else { false } }
+    XCTAssertEqual(session.transcript, "inspect this")
+    XCTAssertNil(session.probeResult)
+  }
+
+  func testStopDuringDelayedProbeRejectsLateResult() async {
+    let probe = FakeProbe()
+    probe.delayed = true
+    let session = SessionCoordinator(probe: probe, speech: FakeSpeech(), defaults: nil)
+    session.runTyped("old goal")
+    await eventually { probe.goals == ["old goal"] }
+    session.stop()
+    session.runTyped("new goal")
+    probe.delayed = false
+    probe.release()
+    await eventually { probe.goals.count == 2 }
+    await eventually { session.state == .complete }
+    XCTAssertEqual(session.probeResult?.goal, "new goal")
+  }
+
+  func testJevGoalProbeCapturesAndDecidesExactlyOnce() async throws {
+    let perception = FakePerception()
+    let engine = FakeEngine(.stop)
+    var restorations = 0
+    let probe = JevGoalProbe(
+      perception: perception,
+      generator: ValidActionGenerator(supportedApplications: []),
+      decisionEngine: engine,
+      prepareTarget: { restorations += 1 }
+    )
+    let result = try await probe.probe(goal: "do nothing")
+    XCTAssertEqual(result.goal, "do nothing")
+    XCTAssertEqual(restorations, 1)
+    XCTAssertEqual(perception.snapshotCalls, 1)
+    let engineCalls = await engine.calls
+    XCTAssertEqual(engineCalls, 1)
+    XCTAssertEqual(result.decision.candidate.action, .stop(reason: "Goal complete or no safe valid action remains"))
+    XCTAssertTrue(result.requestMetric?.isComplete == true)
   }
 }
 

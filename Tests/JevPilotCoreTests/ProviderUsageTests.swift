@@ -84,4 +84,19 @@ final class ProviderUsageTests: XCTestCase {
     } catch {}
     XCTAssertTrue(collector.metrics.isEmpty)
   }
+
+  func testLiveJevProbeWhenExplicitlyEnabled() async throws {
+    let environment = ProcessInfo.processInfo.environment
+    guard environment["JEV_LIVE_JEV_TEST"] == "1",
+      let key = environment["TYPESAFE_API_KEY"], !key.isEmpty else {
+      throw XCTSkip("Set JEV_LIVE_JEV_TEST=1 and TYPESAFE_API_KEY to call the live provider.")
+    }
+    let decision = try await JevDecisionEngine(apiKeyProvider: { key }).decide(
+      goal: "Stop because this is a dry-run provider validation.",
+      state: .init(),
+      candidates: candidates
+    )
+    XCTAssertEqual(decision.candidate.id, "stop")
+    XCTAssertEqual(Set(decision.probabilities.keys), ["stop"])
+  }
 }

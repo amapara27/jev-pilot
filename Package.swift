@@ -11,15 +11,23 @@ let package = Package(
     .library(name: "JevPilotCore", targets: ["JevPilotCore"]),
     .executable(name: "JevPilot", targets: ["JevPilotApp"]),
   ],
+  dependencies: [
+    .package(
+      url: "https://github.com/FluidInference/FluidAudio.git",
+      exact: "0.15.5"
+    ),
+  ],
   targets: [
     .target(
       name: "JevPilotCore",
+      dependencies: [
+        .product(name: "FluidAudio", package: "FluidAudio"),
+      ],
       linkerSettings: [
         .linkedFramework("ApplicationServices"),
         .linkedFramework("AppKit"),
         .linkedFramework("AVFoundation"),
         .linkedFramework("Security"),
-        .linkedFramework("Speech"),
       ]
     ),
     .executableTarget(
