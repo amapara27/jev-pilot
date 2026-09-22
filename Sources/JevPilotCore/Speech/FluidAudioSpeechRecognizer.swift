@@ -71,8 +71,8 @@ public enum SpeechEvent: Sendable {
 @MainActor
 public protocol SpeechProviding: AnyObject {
   var onEvent: ((SpeechEvent) -> Void)? { get set }
-  func prepare(preset: SpeechRecognitionPreset) async
   func start(preset: SpeechRecognitionPreset) async
+  func finish() async
   func stop()
 }
 
@@ -87,6 +87,7 @@ protocol StreamingSpeechEngine: Sendable {
     eou: @escaping @Sendable (String) -> Void
   ) async throws
   func process(_ buffer: AVAudioPCMBuffer) async throws
+  func finish() async throws -> String
   func cancel() async
 }
 
@@ -133,6 +134,11 @@ private actor ParakeetEngine: StreamingSpeechEngine {
     _ = try await manager.process(audioBuffer: buffer)
   }
 
+  func finish() async throws -> String {
+    guard let manager else { throw SpeechFailure.modelNotPrepared }
+    return try await manager.finish()
+  }
+
   func cancel() async {
     await manager?.reset()
   }
@@ -143,7 +149,7 @@ private enum SpeechFailure: LocalizedError {
   case noMicrophone
   var errorDescription: String? {
     switch self {
-    case .modelNotPrepared: "Prepare the selected Parakeet model before listening."
+    case .modelNotPrepared: "The Parakeet model is not ready."
     case .noMicrophone: "No microphone is available."
     }
   }
@@ -245,13 +251,6 @@ public final class FluidAudioSpeechRecognizer: ObservableObject, SpeechProviding
     self.audioSource = audioSource
   }
 
-  /// Explicit preparation downloads when needed and otherwise opens the local cache.
-  public func prepare(preset: SpeechRecognitionPreset) async {
-    stop()
-    let id = generation
-    _ = await prepare(preset: preset, generation: id)
-  }
-
   /// Prepares, asks for microphone access, then starts one ordered stream consumer.
   public func start(preset: SpeechRecognitionPreset) async {
     stop()
@@ -296,6 +295,28 @@ public final class FluidAudioSpeechRecognizer: ObservableObject, SpeechProviding
     }
   }
 
+  /// Drains captured buffers and commits FluidAudio's best transcript once.
+  public func finish() async {
+    let id = generation
+    guard isRecording else { return }
+    audioSource.stop()
+    continuation?.finish()
+    continuation = nil
+    let pending = processingTask
+    processingTask = nil
+    await pending?.value
+    guard generation == id, !Task.isCancelled else { return }
+    do {
+      let transcript = try await engine.finish()
+      guard generation == id, !Task.isCancelled else { return }
+      isRecording = false
+      publish(transcript, isFinal: true, generation: id)
+    } catch is CancellationError {
+    } catch {
+      fail("Transcription could not finish: \(error.localizedDescription)", generation: id)
+    }
+  }
+
   /// Stop invalidates every callback and discards partial speech without finalizing it.
   public func stop() {
     generation = UUID()
@@ -321,7 +342,6 @@ public final class FluidAudioSpeechRecognizer: ObservableObject, SpeechProviding
         }
       }
       guard generation == id, !Task.isCancelled else { return false }
-      onEvent?(.ready)
       return true
     } catch is CancellationError {
       return false

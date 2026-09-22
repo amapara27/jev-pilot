@@ -14,6 +14,22 @@ public final class KeychainAPIKeyStore: @unchecked Sendable {
     self.account = account
   }
 
+  /// Checks unencrypted item attributes without requesting the secret value.
+  public func containsKey() throws -> Bool {
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: service,
+      kSecAttrAccount as String: account,
+      kSecReturnAttributes as String: true,
+      kSecMatchLimit as String: kSecMatchLimitOne,
+    ]
+    var result: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    if status == errSecItemNotFound { return false }
+    guard status == errSecSuccess else { throw KeychainError(status: status) }
+    return true
+  }
+
   /// Loads the stored key, returning nil when no key has been saved.
   public func load() throws -> String? {
     let query: [String: Any] = [

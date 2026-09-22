@@ -29,14 +29,29 @@ private final class PreviewProbe: GoalProbing {
 @MainActor
 private final class PreviewSpeech: SpeechProviding {
   var onEvent: ((SpeechEvent) -> Void)?
-  func prepare(preset: SpeechRecognitionPreset) async { onEvent?(.ready) }
   func start(preset: SpeechRecognitionPreset) async { onEvent?(.ready) }
+  func finish() async { onEvent?(.transcript("Preview transcript", isFinal: true)) }
   func stop() {}
 }
 
 /// Opt-in image artifacts let layout QA run without screen recording or Accessibility access.
 @MainActor
 final class LayoutTests: XCTestCase {
+  func testReadinessUsesKeyExistenceWithoutLoadingSecretData() {
+    var existenceChecks = 0
+    let readiness = Readiness(
+      storedKeyStatus: {
+        existenceChecks += 1
+        return true
+      },
+      environmentKeyStatus: { false }
+    )
+    readiness.refresh()
+    XCTAssertTrue(readiness.hasStoredKey)
+    XCTAssertTrue(readiness.hasKey)
+    XCTAssertEqual(existenceChecks, 1)
+  }
+
   func testRenderControlCenterSurfaces() async throws {
     guard let output = ProcessInfo.processInfo.environment["JEV_PREVIEW_OUTPUT"] else {
       throw XCTSkip("Set JEV_PREVIEW_OUTPUT to render offscreen UI artifacts.")
@@ -83,10 +98,17 @@ final class LayoutTests: XCTestCase {
     try await render("control-light", ContentView(), width: 1040, height: 730)
     try await render("control-dark", ContentView(), width: 1040, height: 730, dark: true)
     try await render("control-narrow", ContentView(), width: 780, height: 580)
+    session.startListening()
+    for _ in 0..<100 where session.state != .listening {
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    try await render("control-listening", ContentView(), width: 1040, height: 730)
+    session.stop()
     try await render("usage", UsageView(), width: 780, height: 730)
     try await render("history", HistoryView(), width: 780, height: 650)
     try await render("history-narrow", HistoryView(), width: 600, height: 650)
-    try await render("settings", SettingsView(), width: 610, height: 690)
+    try await render("settings", SettingsView(), width: 470, height: 390)
+    try await render("settings-dark", SettingsView(), width: 470, height: 390, dark: true)
     try await render("menu-bar", MenuBarPanel(), width: 330, height: 260)
     try await render("menu-bar-dark", MenuBarPanel(), width: 330, height: 260, dark: true)
     try await render("transcript", TranscriptHUD(session: session), width: 440, height: 90)

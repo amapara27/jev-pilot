@@ -1,150 +1,196 @@
-// A compact preferences sheet uses the same tokens and controls as the command workspace.
+// Keeps the few durable app preferences in one compact, progressively disclosed surface.
 import AppKit
 import JevPilotCore
 import SwiftUI
 
 struct SettingsView: View {
   @EnvironmentObject private var session: SessionCoordinator
-  @EnvironmentObject private var store: RunStore
   @EnvironmentObject private var readiness: Readiness
   @Environment(\.scenePhase) private var phase
-  @AppStorage("inputPrice") private var inputPrice = 0.042
-  @AppStorage("outputPrice") private var outputPrice = 0.0
-  @State private var inputDraft = ""
-  @State private var outputDraft = ""
-  @State private var apiKey = ""
-  @State private var message = ""
-  @State private var pricingMessage = ""
-  @State private var clearConfirmation = false
+  @State private var apiKeyDraft = ""
+  @State private var keyError = ""
+  @State private var isEditingKey = false
+  @State private var removeKeyConfirmation = false
   private let keyStore = KeychainAPIKeyStore()
+
   var body: some View {
     ScrollView {
-      VStack(alignment: .leading, spacing: 28) {
-        HStack(alignment: .firstTextBaseline) {
-          Text("Preferences").font(.system(size: 29, weight: .medium)).tracking(-0.8)
-          Spacer()
-        }
-        SettingsSection(title: "01 / Connection") {
-          HStack {
-            Text("TypeSafe / Jev").font(.system(size: 14, weight: .medium))
+      VStack(alignment: .leading, spacing: 22) {
+        Text("Settings")
+          .font(.system(size: 26, weight: .medium))
+          .tracking(-0.6)
+
+        SettingsSection(title: "Connection") {
+          HStack(spacing: 10) {
+            Text("TypeSafe API key").font(.system(size: 13, weight: .medium))
             Spacer()
-            Text(readiness.hasKey ? "CONFIGURED" : "NOT CONFIGURED").font(PilotTheme.mono(10)).foregroundStyle(PilotTheme.muted)
+            if readiness.hasKey {
+              Button("Change API key") { openKeyEditor() }
+                .buttonStyle(PilotButtonStyle())
+              if readiness.hasStoredKey {
+                Button("Remove", role: .destructive) { removeKeyConfirmation = true }
+                  .buttonStyle(PilotButtonStyle(destructive: true))
+              }
+            } else {
+              Button("Add API key") { openKeyEditor() }
+                .buttonStyle(PilotButtonStyle(prominent: true))
+            }
           }
-          SecureField("API key", text: $apiKey).textFieldStyle(.plain)
-            .padding(12).background(PilotTheme.surface).overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(PilotTheme.line))
+          if !keyError.isEmpty {
+            Text(keyError).font(.caption).foregroundStyle(PilotTheme.danger)
+          }
+        }
+
+        SettingsSection(title: "Voice") {
           HStack {
-            Button("Save to Keychain", action: save).buttonStyle(PilotButtonStyle(prominent: true))
-              .disabled(apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            Button("Remove saved key", role: .destructive, action: remove).buttonStyle(PilotButtonStyle())
+            Text("Model").font(.system(size: 13))
+            Spacer()
+            Picker("Voice model", selection: $session.speechPreset) {
+              ForEach(SpeechRecognitionPreset.allCases) { preset in
+                Text(preset.title).tag(preset)
+              }
+            }
+            .labelsHidden()
+            .frame(width: 190)
+            .disabled(session.state.isActive)
           }
-          note("Stored in Keychain. Connects directly to TypeSafe.")
-          if !message.isEmpty { Text(message).font(.caption) }
+          Toggle("Live transcript overlay", isOn: $session.showTranscript)
+            .toggleStyle(.checkbox)
+            .font(.system(size: 13))
         }
-        SettingsSection(title: "02 / Permissions") {
-          permissionRow("Accessibility", status: readiness.accessibility ? "Allowed" : "Required", pane: "Privacy_Accessibility")
-          permissionRow("Microphone", status: readiness.microphone == .authorized ? "Allowed" : readiness.microphone == .notDetermined ? "Not requested" : "Denied", pane: "Privacy_Microphone")
-          Button("Refresh status") { readiness.refresh() }.buttonStyle(PilotButtonStyle())
-        }
-        SettingsSection(title: "03 / Voice") {
-          ListeningModeSelector().frame(width: 260)
-          Picker("Parakeet EOU model", selection: $session.speechPreset) {
-            ForEach(SpeechRecognitionPreset.allCases) { preset in Text(preset.title).tag(preset) }
-          }.frame(width: 300).disabled(session.state.isActive)
-          HStack {
-            Button("Prepare Model") { session.prepareSpeechModel() }
-              .buttonStyle(PilotButtonStyle(prominent: true)).disabled(session.state.isActive)
-            Text(modelStatus).font(PilotTheme.mono(10)).foregroundStyle(PilotTheme.muted)
+
+        SettingsSection(title: "Permissions") {
+          HStack(spacing: 16) {
+            PermissionStatus(title: "Accessibility", allowed: readiness.accessibility)
+            PermissionStatus(title: "Microphone", allowed: readiness.microphone == .authorized)
+            Spacer()
+            Menu("Manage…") {
+              Button("Accessibility…") { readiness.openPermission("Privacy_Accessibility") }
+              Button("Microphone…") { readiness.openPermission("Privacy_Microphone") }
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .accessibilityLabel("Manage permissions")
           }
-          Toggle("Show live transcript overlay", isOn: $session.showTranscript).toggleStyle(.checkbox).font(.system(size: 13))
-          note("English-only Parakeet EOU. Models are cached under ~/Library/Application Support/FluidAudio; cached transcription stays local and offline.")
         }
-        SettingsSection(title: "04 / Estimated pricing", trailing: "USD / MILLION TOKENS") {
-          HStack(spacing: 20) {
-            rateField("Input tokens", text: $inputDraft)
-            rateField("Output tokens", text: $outputDraft)
-          }
-          Button("Save pricing", action: savePricing).buttonStyle(PilotButtonStyle())
-          if !pricingMessage.isEmpty { Text(pricingMessage).font(.caption) }
-          note("Applies to new runs only.")
-          Link("TypeSafe pricing reference ↗", destination: URL(string: "https://typesafe.ai/blog/introducing-system-one-models-and-jev")!)
-            .font(.system(size: 12)).foregroundStyle(PilotTheme.accent)
-        }
-        SettingsSection(title: "05 / Local history") {
-          note("100 runs, stored locally. Includes command text, never audio.")
-          if let error = store.errorMessage { Text(error).font(.caption).foregroundStyle(PilotTheme.danger) }
-          Button("Clear history…", role: .destructive) { clearConfirmation = true }.buttonStyle(PilotButtonStyle(destructive: true))
-        }
-      }.padding(30)
-    }.frame(width: 610, height: 690).foregroundStyle(PilotTheme.text).background(PilotTheme.background).tint(PilotTheme.accent)
-      .onAppear {
-        readiness.refresh()
-        inputDraft = String(inputPrice)
-        outputDraft = String(outputPrice)
       }
-      .onChange(of: phase) { _, phase in if phase == .active { readiness.refresh() } }
-      .alert("Clear saved history?", isPresented: $clearConfirmation) {
-        Button("Cancel", role: .cancel) {}
-        Button("Clear history", role: .destructive) { store.clear() }
-      } message: { Text("Saved runs and their usage totals will be removed. An active run will be kept.") }
-  }
-  private func note(_ text: String) -> some View {
-    Text(text).font(.system(size: 12)).foregroundStyle(PilotTheme.muted).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
-  }
-  private var modelStatus: String {
-    if case .preparingModel = session.state { return session.state.label.uppercased() }
-    return session.speechPreset.isCached ? "READY IN LOCAL CACHE" : "DOWNLOAD REQUIRED"
-  }
-  private func rateField(_ title: String, text: Binding<String>) -> some View {
-    VStack(alignment: .leading, spacing: 8) {
-      Text(title).font(.system(size: 12)).foregroundStyle(PilotTheme.muted)
-      TextField(title, text: text).font(PilotTheme.mono(14)).textFieldStyle(.plain)
-        .padding(12).background(PilotTheme.surface).overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(PilotTheme.line))
+      .padding(24)
+    }
+    .frame(width: 470, height: 390)
+    .foregroundStyle(PilotTheme.text)
+    .background(PilotTheme.background)
+    .tint(PilotTheme.accent)
+    .onAppear { readiness.refresh() }
+    .onChange(of: phase) { _, phase in
+      if phase == .active { readiness.refresh() }
+    }
+    .sheet(isPresented: $isEditingKey) {
+      APIKeyEditor(
+        title: readiness.hasKey ? "Change API key" : "Add API key",
+        key: $apiKeyDraft,
+        error: $keyError,
+        cancel: { isEditingKey = false },
+        save: saveKey
+      )
+    }
+    .alert("Remove API key?", isPresented: $removeKeyConfirmation) {
+      Button("Cancel", role: .cancel) {}
+      Button("Remove", role: .destructive, action: removeKey)
+    } message: {
+      Text("The saved key will be removed from Keychain.")
     }
   }
-  private func permissionRow(_ title: String, status: String, pane: String) -> some View {
-    HStack {
-      Text(title).font(.system(size: 13))
-      Spacer()
-      Text(status).font(PilotTheme.mono(10)).foregroundStyle(PilotTheme.muted)
-      Button("Open ↗") { readiness.openPermission(pane) }.buttonStyle(PilotButtonStyle()).help("Open \(title) permissions")
-        .accessibilityLabel("Open \(title) permissions")
-    }
+
+  private func openKeyEditor() {
+    apiKeyDraft = ""
+    keyError = ""
+    isEditingKey = true
   }
-  private func savePricing() {
-    guard let input = Double(inputDraft), let output = Double(outputDraft), input.isFinite, output.isFinite, input >= 0, output >= 0 else {
-      pricingMessage = "Enter a nonnegative number for each rate."
-      return
-    }
-    inputPrice = input
-    outputPrice = output
-    pricingMessage = "Saved for future runs."
-  }
-  private func save() {
+
+  private func saveKey() {
+    let key = apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !key.isEmpty else { return }
     do {
-      try keyStore.save(apiKey.trimmingCharacters(in: .whitespacesAndNewlines))
-      apiKey = ""
-      message = "Saved securely in Keychain."
-    } catch { message = error.localizedDescription }
-    readiness.refresh()
+      try keyStore.save(key)
+      apiKeyDraft = ""
+      keyError = ""
+      isEditingKey = false
+      readiness.refresh()
+    } catch {
+      keyError = error.localizedDescription
+    }
   }
-  private func remove() {
+
+  private func removeKey() {
     do {
       try keyStore.delete()
-      apiKey = ""
-      message = "Saved key removed. An environment key may still be available."
-    } catch { message = error.localizedDescription }
-    readiness.refresh()
+      keyError = ""
+      readiness.refresh()
+    } catch {
+      keyError = error.localizedDescription
+    }
   }
 }
 
-/// Flat sections provide grouping without system grouped-form cards.
+/// A key field appears only after the user explicitly chooses Add or Change.
+private struct APIKeyEditor: View {
+  let title: String
+  @Binding var key: String
+  @Binding var error: String
+  let cancel: () -> Void
+  let save: () -> Void
+  @FocusState private var isFocused: Bool
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 18) {
+      Text(title).font(.system(size: 20, weight: .medium))
+      SecureField("API key", text: $key)
+        .textFieldStyle(.plain)
+        .padding(12)
+        .background(PilotTheme.surface)
+        .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(PilotTheme.line))
+        .focused($isFocused)
+        .onSubmit(save)
+      if !error.isEmpty {
+        Text(error).font(.caption).foregroundStyle(PilotTheme.danger)
+      }
+      HStack {
+        Spacer()
+        Button("Cancel", action: cancel).buttonStyle(PilotButtonStyle())
+        Button("Save", action: save)
+          .buttonStyle(PilotButtonStyle(prominent: true))
+          .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+      }
+    }
+    .padding(24)
+    .frame(width: 370)
+    .foregroundStyle(PilotTheme.text)
+    .background(PilotTheme.background)
+    .onAppear { isFocused = true }
+  }
+}
+
+/// Permission state is visible without expanding settings into setup instructions.
+private struct PermissionStatus: View {
+  let title: String
+  let allowed: Bool
+
+  var body: some View {
+    Label(title, systemImage: allowed ? "checkmark.circle.fill" : "circle")
+      .font(.system(size: 12))
+      .foregroundStyle(allowed ? PilotTheme.text : PilotTheme.muted)
+      .accessibilityLabel("\(title): \(allowed ? "allowed" : "needed")")
+  }
+}
+
+/// Flat sections retain hierarchy without captions, numbering, or nested card chrome.
 private struct SettingsSection<Content: View>: View {
   let title: String
-  var trailing = ""
   @ViewBuilder var content: Content
+
   var body: some View {
-    VStack(alignment: .leading, spacing: 14) {
-      SectionCaption(title: title, trailing: trailing)
+    VStack(alignment: .leading, spacing: 12) {
+      Text(title).font(.system(size: 13, weight: .semibold))
       PilotRule()
       content
     }

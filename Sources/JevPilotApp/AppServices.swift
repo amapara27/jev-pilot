@@ -6,16 +6,38 @@ import Combine
 import JevPilotCore
 import SwiftUI
 
-/// Reads permission state without prompting at app launch.
+/// Reads permissions and API-key existence without fetching confidential key bytes.
 @MainActor
 final class Readiness: ObservableObject {
   @Published var accessibility = false
   @Published var microphone = AVAuthorizationStatus.notDetermined
   @Published var hasKey = false
+  @Published var hasStoredKey = false
+
+  private let storedKeyStatus: () throws -> Bool
+  private let environmentKeyStatus: () -> Bool
+
+  init(
+    storedKeyStatus: @escaping () throws -> Bool = {
+      try KeychainAPIKeyStore().containsKey()
+    },
+    environmentKeyStatus: @escaping () -> Bool = {
+      ProcessInfo.processInfo.environment["TYPESAFE_API_KEY"]?.isEmpty == false
+    }
+  ) {
+    self.storedKeyStatus = storedKeyStatus
+    self.environmentKeyStatus = environmentKeyStatus
+  }
+
   func refresh() {
     accessibility = AXIsProcessTrusted()
     microphone = AVCaptureDevice.authorizationStatus(for: .audio)
-    hasKey = (try? KeychainAPIKeyStore().loadFromKeychainOrEnvironment())?.isEmpty == false
+    do {
+      hasStoredKey = try storedKeyStatus()
+    } catch {
+      hasStoredKey = false
+    }
+    hasKey = hasStoredKey || environmentKeyStatus()
   }
   var probeBlocker: String? {
     if !hasKey { return "Add your TypeSafe API key in Settings to ask Jev." }

@@ -2,11 +2,6 @@
 import Combine
 import Foundation
 
-public enum ListeningMode: String, CaseIterable, Identifiable, Sendable {
-  case single, continuous
-  public var id: Self { self }  public var title: String { self == .single ? "Single command" : "Continuous" }
-}
-
 /// Coordinates capture and probing while generation checks isolate every late callback.
 @MainActor
 public final class SessionCoordinator: ObservableObject {
@@ -40,9 +35,6 @@ public final class SessionCoordinator: ObservableObject {
   @Published public private(set) var state: State = .stopped
   @Published public private(set) var transcript = ""
   @Published public private(set) var probeResult: JevGoalProbeResult?
-  @Published public var mode: ListeningMode {
-    didSet { defaults?.set(mode.rawValue, forKey: "listeningMode") }
-  }
   @Published public var showTranscript: Bool {
     didSet { defaults?.set(showTranscript, forKey: "showTranscript") }
   }
@@ -55,7 +47,6 @@ public final class SessionCoordinator: ObservableObject {
   private let defaults: UserDefaults?
   private var generation = UUID()
   private var committed = false
-  private var voiceSession = false
   private var workTask: Task<Void, Never>?
 
   public init(
@@ -66,30 +57,25 @@ public final class SessionCoordinator: ObservableObject {
     self.probe = probe
     self.speech = speech
     self.defaults = defaults
-    mode = ListeningMode(rawValue: defaults?.string(forKey: "listeningMode") ?? "") ?? .single
     showTranscript = defaults?.bool(forKey: "showTranscript") ?? false
     speechPreset = SpeechRecognitionPreset(
       rawValue: defaults?.string(forKey: "speechPreset") ?? ""
     ) ?? .balanced320
   }
 
-  /// Downloads or opens the selected model without accessing the microphone.
-  public func prepareSpeechModel() {
-    guard !state.isActive else { return }
-    invalidate(clearTranscript: false)
-    let id = generation
-    state = .preparingModel(progress: nil)
-    speech.onEvent = { [weak self] event in self?.receive(event, generation: id, preparationOnly: true) }
-    workTask = Task { [weak self] in
-      guard let self else { return }
-      await self.speech.prepare(preset: self.speechPreset)
-    }
-  }
-
+  /// Starts a one-shot capture; the speech provider prepares its model automatically.
   public func startListening() {
     guard !state.isActive else { return }
-    voiceSession = true
     beginCapture()
+  }
+
+  /// Flushes the current microphone stream and submits its best final transcript.
+  public func finishListening() {
+    guard state == .listening, !committed else { return }
+    workTask = Task { [weak self] in
+      guard let self else { return }
+      await self.speech.finish()
+    }
   }
 
   /// Typed text bypasses STT but uses the identical one-shot observation and decision path.
@@ -97,7 +83,6 @@ public final class SessionCoordinator: ObservableObject {
     guard !state.isActive,
       !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
     invalidate(clearTranscript: false)
-    voiceSession = false
     transcript = command
     probeResult = nil
     submit(command, generation: generation)
@@ -106,7 +91,6 @@ public final class SessionCoordinator: ObservableObject {
   /// Manual Stop cancels model, audio, and Jev work and never commits partial speech.
   public func stop() {
     invalidate(clearTranscript: state == .listening || isPreparing)
-    voiceSession = false
     state = .stopped
   }
 
@@ -129,7 +113,7 @@ public final class SessionCoordinator: ObservableObject {
     let id = generation
     probeResult = nil
     state = .preparingModel(progress: nil)
-    speech.onEvent = { [weak self] event in self?.receive(event, generation: id, preparationOnly: false) }
+    speech.onEvent = { [weak self] event in self?.receive(event, generation: id) }
     workTask = Task { [weak self] in
       guard let self else { return }
       await self.speech.start(preset: self.speechPreset)
@@ -138,20 +122,19 @@ public final class SessionCoordinator: ObservableObject {
 
   private func receive(
     _ event: SpeechEvent,
-    generation id: UUID,
-    preparationOnly: Bool
+    generation id: UUID
   ) {
     guard id == generation, !committed else { return }
     switch event {
     case .preparing(let progress):
       state = .preparingModel(progress: progress)
     case .ready:
-      state = preparationOnly ? .complete : .listening
+      state = .listening
     case .failed(let message):
       invalidate(clearTranscript: false)
       state = .error(message)
     case .transcript(let text, let isFinal):
-      guard !preparationOnly, state == .listening else { return }
+      guard state == .listening else { return }
       transcript = text
       guard isFinal else { return }
       let goal = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -177,16 +160,10 @@ public final class SessionCoordinator: ObservableObject {
         guard self.generation == id, !Task.isCancelled else { return }
         self.probeResult = result
         self.committed = false
-        if self.voiceSession, self.mode == .continuous {
-          self.beginCapture()
-        } else {
-          self.voiceSession = false
-          self.state = .complete
-        }
+        self.state = .complete
       } catch is CancellationError {
       } catch {
         guard self.generation == id else { return }
-        self.voiceSession = false
         self.committed = false
         self.state = .error(error.localizedDescription)
       }

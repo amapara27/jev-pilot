@@ -52,15 +52,20 @@ private actor FakeEngine: DecisionEngine {
 @MainActor
 private final class FakeSpeech: SpeechProviding {
   var onEvent: ((SpeechEvent) -> Void)?
-  var preparations: [SpeechRecognitionPreset] = []
   var presets: [SpeechRecognitionPreset] = []
   var starts = 0
   var stops = 0
-  func prepare(preset: SpeechRecognitionPreset) async { preparations.append(preset) }
+  var finishes = 0
+  var finishText = ""
+  var autoReady = true
   func start(preset: SpeechRecognitionPreset) async {
     starts += 1
     presets.append(preset)
-    onEvent?(.ready)
+    if autoReady { onEvent?(.ready) }
+  }
+  func finish() async {
+    finishes += 1
+    onEvent?(.transcript(finishText, isFinal: true))
   }
   func stop() { stops += 1 }
   func emit(_ text: String, final: Bool = false) { onEvent?(.transcript(text, isFinal: final)) }
@@ -89,6 +94,7 @@ private actor FakeStreamingSpeechEngine: StreamingSpeechEngine {
   func process(_ buffer: AVAudioPCMBuffer) async throws {
     processedSamples.append(buffer.floatChannelData?[0][0] ?? -1)
   }
+  func finish() async throws -> String { "finished transcript" }
   func cancel() async {}
   func emitPartial(_ text: String) { partial?(text) }
   func emitFinal(_ text: String) { eou?(text) }
@@ -307,6 +313,23 @@ final class RuntimeTests: XCTestCase {
     recognizer.stop()
   }
 
+  func testFluidAudioAdapterFinishDrainsAudioAndPublishesOneFinalTranscript() async {
+    let engine = FakeStreamingSpeechEngine()
+    let audio = FakeAudioSource()
+    let recognizer = FluidAudioSpeechRecognizer(engine: engine, audioSource: audio)
+    var finals: [String] = []
+    recognizer.onEvent = { event in
+      if case .transcript(let text, true) = event { finals.append(text) }
+    }
+    await recognizer.start(preset: .balanced320)
+    audio.emit(7)
+    await recognizer.finish()
+    let snapshot = await engine.snapshot()
+    XCTAssertEqual(snapshot.1, [7])
+    XCTAssertEqual(finals, ["finished transcript"])
+    XCTAssertFalse(recognizer.isRecording)
+  }
+
   func testAudioTapHandlerRunsOutsideMainActor() async {
     let probe = TapSampleProbe()
     let tap = TapBlockBox(makeAudioTapHandler { buffer in
@@ -334,6 +357,20 @@ final class RuntimeTests: XCTestCase {
     XCTAssertEqual(session.transcript, "")
   }
 
+  func testFinishListeningRoutesBestTranscriptThroughProbe() async {
+    let probe = FakeProbe()
+    let speech = FakeSpeech()
+    speech.finishText = "open Safari"
+    let session = SessionCoordinator(probe: probe, speech: speech, defaults: nil)
+    session.startListening()
+    await eventually { session.state == .listening }
+    session.finishListening()
+    await eventually { session.state == .complete }
+    XCTAssertEqual(speech.finishes, 1)
+    XCTAssertEqual(probe.goals, ["open Safari"])
+    XCTAssertEqual(session.transcript, "open Safari")
+  }
+
   func testStopDiscardsPartialAndPreviousCaptureCallbacks() async {
     let probe = FakeProbe()
     let speech = FakeSpeech()
@@ -351,20 +388,6 @@ final class RuntimeTests: XCTestCase {
     session.stop()
   }
 
-  func testContinuousResumesOnlyAfterSuccess() async {
-    let probe = FakeProbe()
-    let speech = FakeSpeech()
-    let session = SessionCoordinator(probe: probe, speech: speech, defaults: nil)
-    session.mode = .continuous
-    session.startListening()
-    await eventually { speech.starts == 1 }
-    speech.emit("switch to Safari", final: true)
-    await eventually { speech.starts == 2 }
-    XCTAssertEqual(session.state, .listening)
-    session.stop()
-    XCTAssertEqual(session.state, .stopped)
-  }
-
   func testTypedGoalIsPassedUnchangedAndCreatesNoRunRecord() async {
     let probe = FakeProbe()
     let speech = FakeSpeech()
@@ -375,30 +398,33 @@ final class RuntimeTests: XCTestCase {
     XCTAssertEqual(session.transcript, "Preserve THIS punctuation!")
   }
 
-  func testPrepareUsesSelectedPresetAndSurfacesProgress() async {
+  func testStartUsesSelectedPresetAndSurfacesAutomaticPreparationProgress() async {
     let probe = FakeProbe()
     let speech = FakeSpeech()
+    speech.autoReady = false
     let session = SessionCoordinator(probe: probe, speech: speech, defaults: nil)
     session.speechPreset = .slow1280
-    session.prepareSpeechModel()
-    await eventually { speech.preparations == [.slow1280] }
+    session.startListening()
+    await eventually { speech.presets == [.slow1280] }
     speech.onEvent?(.preparing(progress: 0.5))
     XCTAssertEqual(session.state, .preparingModel(progress: 0.5))
     speech.onEvent?(.ready)
-    XCTAssertEqual(session.state, .complete)
+    XCTAssertEqual(session.state, .listening)
+    session.stop()
   }
 
   func testPreparationFailureAndCancelledLoadCannotOverwriteState() async {
     let speech = FakeSpeech()
+    speech.autoReady = false
     let session = SessionCoordinator(probe: FakeProbe(), speech: speech, defaults: nil)
-    session.prepareSpeechModel()
+    session.startListening()
     let cancelledCallback = speech.onEvent
     session.stop()
     cancelledCallback?(.preparing(progress: 0.9))
     cancelledCallback?(.ready)
     XCTAssertEqual(session.state, .stopped)
 
-    session.prepareSpeechModel()
+    session.startListening()
     speech.onEvent?(.failed("download failed"))
     XCTAssertEqual(session.state, .error("download failed"))
   }
