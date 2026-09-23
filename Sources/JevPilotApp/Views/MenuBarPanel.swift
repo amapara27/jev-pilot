@@ -27,7 +27,7 @@ struct MenuBarPanel: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
       HStack {
-        Text("pilot").font(.system(size: 24, weight: .bold)).tracking(-1)
+        Text("pilot").font(PilotTheme.label(24, weight: .bold)).tracking(-1)
         Spacer()
         PilotMark(size: 19).foregroundStyle(PilotTheme.signal)
       }.foregroundStyle(PilotTheme.railText).padding(20).background(PilotTheme.rail)

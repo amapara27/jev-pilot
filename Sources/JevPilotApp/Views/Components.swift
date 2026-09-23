@@ -6,8 +6,8 @@ struct Surface<Content: View>: View {
   @ViewBuilder var content: Content
   var body: some View {
     content.padding(22).frame(maxWidth: .infinity, alignment: .leading)
-      .background(PilotTheme.surface, in: RoundedRectangle(cornerRadius: 7))
-      .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(PilotTheme.line))
+      .background(PilotTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+      .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(PilotTheme.line))
   }
 }
 
@@ -15,7 +15,7 @@ struct StatusIndicator: View {
   let state: SessionCoordinator.State
   var body: some View {
     HStack(spacing: 8) {
-      Rectangle().fill(color).frame(width: 6, height: 6)
+      Circle().fill(color).frame(width: 6, height: 6)
       Text(label.uppercased()).font(PilotTheme.mono(10)).tracking(0.9)
     }.accessibilityElement(children: .combine)
   }
@@ -38,7 +38,8 @@ struct MetricView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
       Text(title.uppercased()).font(PilotTheme.mono(10)).foregroundStyle(PilotTheme.muted).tracking(0.7)
-      Text(value).font(PilotTheme.mono(23, weight: .regular)).foregroundStyle(PilotTheme.text).monospacedDigit()
+      Text(value).font(PilotTheme.label(25, weight: .regular)).foregroundStyle(PilotTheme.text).monospacedDigit()
+        .lineLimit(1).minimumScaleFactor(0.6)
     }.frame(maxWidth: .infinity, alignment: .leading)
   }
 }

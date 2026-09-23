@@ -17,12 +17,12 @@ struct SettingsView: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 22) {
         Text("Settings")
-          .font(.system(size: 26, weight: .medium))
+          .font(PilotTheme.display(30))
           .tracking(-0.6)
 
         SettingsSection(title: "Connection") {
           HStack(spacing: 10) {
-            Text("TypeSafe API key").font(.system(size: 13, weight: .medium))
+            Label("TypeSafe API key", systemImage: "key.horizontal").font(PilotTheme.label())
             Spacer()
             if readiness.hasKey {
               Button("Change API key") { openKeyEditor() }
@@ -42,41 +42,29 @@ struct SettingsView: View {
         }
 
         SettingsSection(title: "Voice") {
-          HStack {
-            Text("Model").font(.system(size: 13))
-            Spacer()
-            Picker("Voice model", selection: $session.speechPreset) {
-              ForEach(SpeechRecognitionPreset.allCases) { preset in
-                Text(preset.title).tag(preset)
-              }
-            }
-            .labelsHidden()
-            .frame(width: 190)
-            .disabled(session.state.isActive)
-          }
+          PilotChoiceGroup(label: "Voice model", selection: $session.speechPreset, choices: [
+            .init(value: .fast160, title: "Fast", detail: "160 ms"),
+            .init(value: .balanced320, title: "Balanced", detail: "320 ms"),
+            .init(value: .slow1280, title: "Slow", detail: "1280 ms")
+          ]).disabled(session.state.isActive)
           Toggle("Live transcript overlay", isOn: $session.showTranscript)
-            .toggleStyle(.checkbox)
-            .font(.system(size: 13))
+            .toggleStyle(PilotToggleStyle())
         }
 
         SettingsSection(title: "Permissions") {
-          HStack(spacing: 16) {
-            PermissionStatus(title: "Accessibility", allowed: readiness.accessibility)
-            PermissionStatus(title: "Microphone", allowed: readiness.microphone == .authorized)
-            Spacer()
-            Menu("Manage…") {
-              Button("Accessibility…") { readiness.openPermission("Privacy_Accessibility") }
-              Button("Microphone…") { readiness.openPermission("Privacy_Microphone") }
+          HStack(spacing: 8) {
+            PermissionButton(title: "Accessibility", allowed: readiness.accessibility) {
+              readiness.openPermission("Privacy_Accessibility")
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .accessibilityLabel("Manage permissions")
+            PermissionButton(title: "Microphone", allowed: readiness.microphone == .authorized) {
+              readiness.openPermission("Privacy_Microphone")
+            }
           }
         }
       }
       .padding(24)
     }
-    .frame(width: 470, height: 390)
+    .frame(width: 470, height: 420)
     .foregroundStyle(PilotTheme.text)
     .background(PilotTheme.background)
     .tint(PilotTheme.accent)
@@ -143,7 +131,7 @@ private struct APIKeyEditor: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 18) {
-      Text(title).font(.system(size: 20, weight: .medium))
+      Text(title).font(PilotTheme.display(26))
       SecureField("API key", text: $key)
         .textFieldStyle(.plain)
         .padding(12)
@@ -171,15 +159,22 @@ private struct APIKeyEditor: View {
 }
 
 /// Permission state is visible without expanding settings into setup instructions.
-private struct PermissionStatus: View {
+private struct PermissionButton: View {
   let title: String
   let allowed: Bool
+  let action: () -> Void
 
   var body: some View {
-    Label(title, systemImage: allowed ? "checkmark.circle.fill" : "circle")
-      .font(.system(size: 12))
-      .foregroundStyle(allowed ? PilotTheme.text : PilotTheme.muted)
-      .accessibilityLabel("\(title): \(allowed ? "allowed" : "needed")")
+    Button(action: action) {
+      HStack(spacing: 8) {
+        Image(systemName: allowed ? "checkmark.circle" : "circle")
+          .foregroundStyle(allowed ? PilotTheme.accent : PilotTheme.muted)
+        Text(title)
+        Spacer(minLength: 0)
+        Image(systemName: "arrow.up.right").font(.system(size: 9)).foregroundStyle(PilotTheme.muted)
+      }
+    }.buttonStyle(PilotButtonStyle())
+      .accessibilityLabel("\(title): \(allowed ? "allowed" : "needed"). Open permission settings")
   }
 }
 
@@ -190,8 +185,7 @@ private struct SettingsSection<Content: View>: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
-      Text(title).font(.system(size: 13, weight: .semibold))
-      PilotRule()
+      SectionCaption(title: title)
       content
     }
   }

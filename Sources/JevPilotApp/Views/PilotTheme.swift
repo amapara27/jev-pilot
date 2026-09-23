@@ -21,6 +21,14 @@ enum PilotTheme {
   static let onDanger = adaptive(0xFFFFFF, 0x291A18)
   static let rule: CGFloat = 1
 
+  /// A restrained serif display face contrasts with compact sans-serif controls.
+  static func display(_ size: CGFloat) -> Font {
+    .system(size: size, weight: .regular, design: .serif)
+  }
+  static func label(_ size: CGFloat = 13, weight: Font.Weight = .medium) -> Font {
+    .system(size: size, weight: weight, design: .rounded)
+  }
+
   static func mono(_ size: CGFloat = 11, weight: Font.Weight = .medium) -> Font {
     .system(size: size, weight: weight, design: .monospaced)
   }
@@ -56,17 +64,18 @@ struct PilotButtonStyle: ButtonStyle {
     let prominent: Bool
     let destructive: Bool
     @Environment(\.isEnabled) private var enabled
+    @Environment(\.isFocused) private var focused
     @State private var hovered = false
     private var fill: Color {
       if prominent { return destructive ? PilotTheme.danger : PilotTheme.buttonFill }
       return hovered ? PilotTheme.inset : PilotTheme.surface
     }
     var body: some View {
-      configuration.label.font(.system(size: 12, weight: .semibold))
+      configuration.label.font(PilotTheme.label(12, weight: .semibold))
         .padding(.horizontal, 14).padding(.vertical, 11)
         .foregroundStyle(prominent ? (destructive ? PilotTheme.onDanger : PilotTheme.onAccent) : destructive ? PilotTheme.danger : PilotTheme.text)
-        .background(fill.opacity(configuration.isPressed ? 0.75 : 1), in: RoundedRectangle(cornerRadius: 5))
-        .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(prominent ? .clear : PilotTheme.line))
+        .background(fill.opacity(configuration.isPressed ? 0.75 : 1), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(focused ? PilotTheme.accent : prominent ? .clear : PilotTheme.line, lineWidth: focused ? 2 : 1))
         .opacity(enabled ? 1 : 0.4)
         .contentShape(Rectangle())
         .onHover { hovered = $0 }

@@ -14,7 +14,7 @@ struct HistoryView: View {
     VStack(alignment: .leading, spacing: 0) {
       HStack(alignment: .top) {
         VStack(alignment: .leading, spacing: 7) {
-          Text("History").font(.system(size: 29, weight: .medium)).tracking(-0.8)
+          Text("History").font(PilotTheme.display(34)).tracking(-0.8)
         }
         Spacer()
         Button("Clear history", role: .destructive) { clearConfirmation = true }
@@ -22,8 +22,8 @@ struct HistoryView: View {
       }.padding(28)
       HStack(spacing: 10) {
         Image(systemName: "magnifyingglass").foregroundStyle(PilotTheme.muted).accessibilityHidden(true)
-        TextField("Search commands or outcomes", text: $search).font(PilotTheme.mono(12)).textFieldStyle(.plain).accessibilityLabel("Search runs")
-      }.padding(13).background(PilotTheme.surface).overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(PilotTheme.line))
+        TextField("Search commands or outcomes", text: $search).font(PilotTheme.label(12)).textFieldStyle(.plain).accessibilityLabel("Search runs")
+      }.padding(13).background(PilotTheme.surface, in: RoundedRectangle(cornerRadius: 10)).overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(PilotTheme.line))
         .padding(.horizontal, 28).padding(.bottom, 24)
       PilotRule()
       if filtered.isEmpty {
@@ -61,7 +61,7 @@ struct HistoryView: View {
                   Button(role: .destructive) { store.delete(run.id); selectedID = filtered.first?.id } label: { Image(systemName: "trash") }
                     .buttonStyle(PilotButtonStyle()).disabled(run.outcome == nil).help("Delete run").accessibilityLabel("Delete run")
                 }
-                Text(run.command).font(.system(size: 22, weight: .medium)).tracking(-0.5).textSelection(.enabled)
+                Text(run.command).font(PilotTheme.display(26)).tracking(-0.5).textSelection(.enabled)
                 Text(run.startedAt.formatted(date: .abbreviated, time: .shortened)).font(PilotTheme.mono(10)).foregroundStyle(PilotTheme.muted)
                 HStack {
                   MetricView(title: "Duration", value: durationLabel(run.duration))
@@ -79,7 +79,7 @@ struct HistoryView: View {
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
           } else {
             VStack(alignment: .leading, spacing: 8) {
-              Text("Select a run.").font(.system(size: 22, weight: .medium))
+              Text("Select a run.").font(PilotTheme.display(26))
               Spacer()
             }.padding(28).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
           }
@@ -110,22 +110,18 @@ struct UsageView: View {
       VStack(alignment: .leading, spacing: 28) {
         HStack(alignment: .top) {
           VStack(alignment: .leading, spacing: 7) {
-            Text("Usage").font(.system(size: 29, weight: .medium)).tracking(-0.8)
+            Text("Usage").font(PilotTheme.display(34)).tracking(-0.8)
           }
           Spacer()
         }
-        HStack(spacing: 6) {
-          ForEach(Array(["Today", "7 days", "30 days"].enumerated()), id: \.offset) { index, title in
-            Button(title) { period = index }.buttonStyle(PilotButtonStyle(prominent: period == index))
-              .accessibilityAddTraits(period == index ? .isSelected : [])
-          }
-          Spacer()
-        }.accessibilityElement(children: .contain).accessibilityLabel("Usage period")
+        PilotChoiceGroup(label: "Usage period", selection: $period, choices: [
+          .init(value: 0, title: "Today"), .init(value: 1, title: "7 days"), .init(value: 2, title: "30 days")
+        ]).frame(maxWidth: 320)
         Surface {
           VStack(alignment: .leading, spacing: 26) {
             SectionCaption(title: "Estimated API cost", trailing: "USD")
             Text(summary.incomplete && summary.estimatedCost == 0 ? "Unavailable" : costLabel(summary.estimatedCost))
-              .font(PilotTheme.mono(43, weight: .regular)).tracking(-2).monospacedDigit()
+              .font(PilotTheme.label(43, weight: .regular)).tracking(-2).monospacedDigit()
               .foregroundStyle(PilotTheme.accent).minimumScaleFactor(0.65).lineLimit(1)
             PilotRule()
             HStack {
