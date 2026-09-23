@@ -24,25 +24,20 @@ public final class MacOSActionExecutor: ActionExecuting {
       else {
         return .init(succeeded: false, message: "\(name) is not installed.")
       }
-      do {
-        _ = try await NSWorkspace.shared.openApplication(at: url, configuration: .init())
-        return .init(succeeded: true, message: "Opened \(name).")
-      } catch {
-        return .init(
-          succeeded: false, message: "Could not open \(name): \(error.localizedDescription)")
-      }
+      return await activateApplication(at: url, bundleIdentifier: bundleIdentifier, name: name, successVerb: "Opened", failureVerb: "open")
 
     case .focusApp(let bundleIdentifier, let name):
       guard
         let application = NSRunningApplication.runningApplications(
           withBundleIdentifier: bundleIdentifier
-        ).first
+        ).first(where: { !$0.isTerminated }),
+        let url = application.bundleURL ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
       else {
         return .init(succeeded: false, message: "\(name) is no longer running.")
       }
-      let succeeded = application.activate(options: [.activateAllWindows])
-      return .init(
-        succeeded: succeeded, message: succeeded ? "Focused \(name)." : "Could not focus \(name).")
+      // Workspace requests foreground activation even though Jev Pilot has restored the
+      // previously reviewed app and is no longer the frontmost process.
+      return await activateApplication(at: url, bundleIdentifier: bundleIdentifier, name: name, successVerb: "Focused", failureVerb: "focus")
 
     case .closeWindow(let windowID, let title):
       guard let window = perception.element(for: windowID),
@@ -96,6 +91,33 @@ public final class MacOSActionExecutor: ActionExecuting {
       return scroll(lines: -5, message: "Scrolled down.")
     case .stop(let reason):
       return .init(succeeded: true, message: reason)
+    }
+  }
+
+  /// A successful launch request is not enough: wait until the chosen app is actually frontmost.
+  private func activateApplication(
+    at url: URL, bundleIdentifier: String, name: String,
+    successVerb: String, failureVerb: String
+  ) async -> ExecutionResult {
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.activates = true
+    configuration.allowsRunningApplicationSubstitution = true
+    do {
+      let application = try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+      guard !Task.isCancelled else { return .init(succeeded: false, message: "Run stopped.") }
+      guard application.bundleIdentifier == bundleIdentifier else {
+        return .init(succeeded: false, message: "macOS opened a different app instead of \(name).")
+      }
+      for _ in 0..<60 {
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier {
+          return .init(succeeded: true, message: "\(successVerb) \(name).")
+        }
+        do { try await Task.sleep(for: .milliseconds(50)) }
+        catch { return .init(succeeded: false, message: "Run stopped.") }
+      }
+      return .init(succeeded: false, message: "macOS did not bring \(name) to the foreground.")
+    } catch {
+      return .init(succeeded: false, message: "Could not \(failureVerb) \(name): \(error.localizedDescription)")
     }
   }
 

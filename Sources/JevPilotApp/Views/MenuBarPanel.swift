@@ -13,15 +13,18 @@ struct MenuBarIcon: View {
     case .preparingModel: "arrow.down.circle"
     case .listening: "mic.fill"
     case .askingJev: "waveform"
+    case .running: "gearshape.2"
+    case .awaitingConfirmation: "questionmark.circle"
     case .complete: "checkmark.circle"
-    case .error: "exclamationmark.triangle"
-    case .stopped: "waveform.and.mic"
+    case .error, .blocked: "exclamationmark.triangle"
+    case .stopped, .rejected: "waveform.and.mic"
     }
   }
 }
 
 struct MenuBarPanel: View {
   @EnvironmentObject private var session: SessionCoordinator
+  @EnvironmentObject private var controller: AutomationController
   @EnvironmentObject private var readiness: Readiness
   @Environment(\.openWindow) private var openWindow
   var body: some View {
@@ -36,12 +39,42 @@ struct MenuBarPanel: View {
         if case .error(let message) = session.state {
           Text(message).font(.caption).foregroundStyle(PilotTheme.danger).fixedSize(horizontal: false, vertical: true)
         }
+        if case .blocked(let message) = session.state {
+          Text(message).font(.caption).foregroundStyle(PilotTheme.danger).fixedSize(horizontal: false, vertical: true)
+        }
         ListeningControls(compact: true)
         if !session.transcript.isEmpty {
           Text(session.transcript).font(.callout).lineLimit(3)
         }
-        if let decision = session.probeResult?.decision {
-          Text(decision.candidate.action.summary).font(.caption).foregroundStyle(PilotTheme.muted).lineLimit(2)
+        if let decision = controller.latestDecision {
+          HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(decision.candidate.action.summary).lineLimit(2)
+            Spacer(minLength: 0)
+            Text((decision.probabilities[decision.candidate.id] ?? 0).formatted(.percent.precision(.fractionLength(1))))
+              .font(PilotTheme.mono(10)).monospacedDigit()
+          }.font(.caption).foregroundStyle(PilotTheme.muted)
+          VStack(spacing: 5) {
+            ForEach(Array(controller.availableActions.sorted {
+              (decision.probabilities[$0.id] ?? 0) > (decision.probabilities[$1.id] ?? 0)
+            }.filter { $0.id != decision.candidate.id }.prefix(2))) { candidate in
+              HStack {
+                Text(candidate.action.summary).lineLimit(1)
+                Spacer(minLength: 6)
+                Text((decision.probabilities[candidate.id] ?? 0).formatted(.percent.precision(.fractionLength(1))))
+                  .monospacedDigit()
+              }.font(PilotTheme.mono(10)).foregroundStyle(PilotTheme.muted)
+            }
+          }
+        }
+        if let lastAction = controller.history.last {
+          Text(lastAction.message).font(.caption).foregroundStyle(PilotTheme.muted).lineLimit(2)
+        }
+        if let pending = controller.pendingConfirmation {
+          Text(pending.assessment.reason).font(.caption).foregroundStyle(PilotTheme.muted)
+          HStack(spacing: 8) {
+            Button("Approve") { session.confirmPendingAction() }.buttonStyle(PilotButtonStyle(prominent: true))
+            Button("Reject") { session.rejectPendingAction() }.buttonStyle(PilotButtonStyle())
+          }
         }
         PilotRule()
         Button {
@@ -64,6 +97,7 @@ struct MenuBarPanel: View {
 
 struct TranscriptHUD: View {
   @ObservedObject var session: SessionCoordinator
+  @ObservedObject var controller: AutomationController
   var body: some View {
     HStack(spacing: 16) {
       PilotMark(size: 23).foregroundStyle(PilotTheme.accent)
@@ -71,6 +105,9 @@ struct TranscriptHUD: View {
         StatusIndicator(state: session.state)
         Text(session.transcript.isEmpty ? "Say a command…" : session.transcript)
           .font(.system(size: 13)).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+        if let summary = controller.history.last?.action.summary ?? controller.latestDecision?.candidate.action.summary {
+          Text(summary).font(PilotTheme.mono(10)).foregroundStyle(PilotTheme.muted).lineLimit(1)
+        }
       }
     }.padding(18).frame(width: 440, height: 90).foregroundStyle(PilotTheme.text)
       .background(PilotTheme.surface, in: RoundedRectangle(cornerRadius: 7))

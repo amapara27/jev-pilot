@@ -2,6 +2,67 @@
 import Foundation
 import Security
 
+/// Reads a development key only when the app was explicitly launched with a file path.
+public enum DevelopmentAPIKey {
+  public static let fileArgument = "--jev-dev-env-file"
+
+  public static func loadOverride(
+    arguments: [String] = ProcessInfo.processInfo.arguments,
+    environment: [String: String] = ProcessInfo.processInfo.environment
+  ) throws -> String? {
+    if let index = arguments.firstIndex(of: fileArgument) {
+      guard arguments.indices.contains(index + 1), !arguments[index + 1].isEmpty else {
+        throw DevelopmentAPIKeyError.missingFilePath
+      }
+      return try loadFile(at: arguments[index + 1])
+    }
+    if let key = environment["TYPESAFE_API_KEY"], !key.isEmpty { return key }
+    return nil
+  }
+
+  /// Parse a single dotenv assignment without evaluating the file as shell code.
+  private static func loadFile(at path: String) throws -> String {
+    let contents = try String(contentsOfFile: path, encoding: .utf8)
+    for line in contents.split(whereSeparator: \.isNewline) {
+      let entry = line.trimmingCharacters(in: .whitespaces)
+      guard !entry.isEmpty, !entry.hasPrefix("#"), let separator = entry.firstIndex(of: "=") else { continue }
+      let name = entry[..<separator].trimmingCharacters(in: .whitespaces)
+      guard name == "TYPESAFE_API_KEY" || name == "export TYPESAFE_API_KEY" else { continue }
+      var value = entry[entry.index(after: separator)...].trimmingCharacters(in: .whitespaces)
+      if value.count >= 2,
+        (value.hasPrefix("\"") && value.hasSuffix("\"")) || (value.hasPrefix("'") && value.hasSuffix("'")) {
+        value.removeFirst()
+        value.removeLast()
+      }
+      guard !value.isEmpty else { throw DevelopmentAPIKeyError.missingKey }
+      return value
+    }
+    throw DevelopmentAPIKeyError.missingKey
+  }
+
+  /// Keep the keychain closure lazy so a development override never touches Keychain.
+  static func resolve(
+    developmentOverride: () throws -> String?,
+    keychain: () throws -> String?
+  ) throws -> String {
+    if let key = try developmentOverride(), !key.isEmpty { return key }
+    if let key = try keychain(), !key.isEmpty { return key }
+    throw DecisionError.missingAPIKey
+  }
+}
+
+/// Gives an actionable, non-secret error for an explicitly selected development file.
+public enum DevelopmentAPIKeyError: LocalizedError, Equatable {
+  case missingFilePath, missingKey
+
+  public var errorDescription: String? {
+    switch self {
+    case .missingFilePath: "The development API key file path is missing."
+    case .missingKey: "The development .env file has no TYPESAFE_API_KEY value."
+    }
+  }
+}
+
 /// Provides the app's small, Keychain-backed API-key storage boundary.
 public final class KeychainAPIKeyStore: @unchecked Sendable {
   public static let defaultService = "ai.typesafe.jev-pilot"
@@ -83,13 +144,12 @@ public final class KeychainAPIKeyStore: @unchecked Sendable {
     }
   }
 
-  /// Loads Keychain first, then the development-only environment fallback.
-  public func loadFromKeychainOrEnvironment() throws -> String {
-    if let key = try load(), !key.isEmpty { return key }
-    if let key = ProcessInfo.processInfo.environment["TYPESAFE_API_KEY"], !key.isEmpty {
-      return key
-    }
-    throw DecisionError.missingAPIKey
+  /// Explicit development overrides bypass Keychain; normal launches use the saved key.
+  public func loadFromDevelopmentOverrideOrKeychain() throws -> String {
+    try DevelopmentAPIKey.resolve(
+      developmentOverride: { try DevelopmentAPIKey.loadOverride() },
+      keychain: { try load() }
+    )
   }
 }
 

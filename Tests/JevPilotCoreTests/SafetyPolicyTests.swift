@@ -30,6 +30,19 @@ final class SafetyPolicyTests: XCTestCase {
     )
   }
 
+  func testSpaceCloseAndDeleteControlsRequireConfirmation() {
+    let policy = SafetyPolicy()
+    let state = DesktopState(isAccessibilityTrusted: true)
+    let actions: [AutomationAction] = [
+      .pressKey(.space),
+      .closeWindow(windowID: "window.0", title: "Draft"),
+      .clickElement(elementID: "ax:root.0", label: "Delete item"),
+    ]
+    for action in actions {
+      XCTAssertEqual(policy.assess(action: action, confidence: 1, state: state).disposition, .requireConfirmation)
+    }
+  }
+
   func testSecureFieldsAndPurchasesAreBlocked() {
     let state = DesktopState(elements: [
       .init(id: "password", role: "AXTextField", subrole: "AXSecureTextField", label: "Password")

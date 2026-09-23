@@ -40,6 +40,7 @@ public final class AutomationController: ObservableObject {
   private let decisionEngine: any DecisionEngine
   private let safetyPolicy: SafetyPolicy
   private let executor: ActionExecuting
+  private let prepareTarget: @MainActor (Int32?) async throws -> Void
   private let maximumSteps: Int
   private let stabilizationMilliseconds: Int
   private var generation = UUID()
@@ -53,13 +54,15 @@ public final class AutomationController: ObservableObject {
     executor: ActionExecuting,
     maximumSteps: Int = 12,
     store: RunStore? = nil,
-    stabilizationMilliseconds: Int = 350
+    stabilizationMilliseconds: Int = 350,
+    prepareTarget: @escaping @MainActor (Int32?) async throws -> Void = { _ in }
   ) {
     self.perception = perception
     self.actionGenerator = actionGenerator
     self.decisionEngine = decisionEngine
     self.safetyPolicy = safetyPolicy
     self.executor = executor
+    self.prepareTarget = prepareTarget
     self.maximumSteps = maximumSteps
     self.store = store ?? RunStore(inMemory: true)
     self.stabilizationMilliseconds = stabilizationMilliseconds
@@ -96,7 +99,7 @@ public final class AutomationController: ObservableObject {
     if currentRun?.outcome == nil, currentRun != nil { finish(.stopped, status: .stopped) }
   }
 
-  /// Validates the reviewed desktop again after the app restores the external target.
+  /// Restores the reviewed app and validates the selected action once more.
   public func confirmPendingAction() {
     guard let pending = pendingConfirmation, let original = latestState else { return }
     pendingConfirmation = nil
@@ -105,9 +108,15 @@ public final class AutomationController: ObservableObject {
     task = Task { [weak self] in
       guard let self, self.isCurrent(id) else { return }
       do {
-        let fresh = try self.perception.snapshot(recentActions: self.history)
-        guard Self.sameTarget(original, fresh) else {
+        try await self.prepareTarget(original.activeApplication?.processIdentifier)
+        guard self.isCurrent(id) else { return }
+        guard let fresh = try self.validatedState(for: pending.decision.candidate.action, goal: pending.goal, selectedState: original) else {
           self.finish(.failed, status: .failed("The target changed. Start a new command."), detail: "Confirmation target changed.")
+          return
+        }
+        let assessment = self.safetyPolicy.assess(action: pending.decision.candidate.action, confidence: pending.decision.confidence, state: fresh)
+        if assessment.disposition == .deny {
+          self.finish(.blocked, status: .blocked(assessment.reason), detail: assessment.reason)
           return
         }
         guard self.isCurrent(id) else { return }
@@ -129,12 +138,35 @@ public final class AutomationController: ObservableObject {
   }
   public func requestAccessibilityPermission() { _ = perception.requestAccessibilityPermission(prompt: true) }
 
-  private static func sameTarget(_ lhs: DesktopState, _ rhs: DesktopState) -> Bool {
-    lhs.activeApplication == rhs.activeApplication && lhs.windows == rhs.windows
-      && lhs.focusedWindowID == rhs.focusedWindowID && lhs.focusedElementID == rhs.focusedElementID
-      && lhs.elements == rhs.elements
-  }
   private func isCurrent(_ id: UUID) -> Bool { generation == id && !Task.isCancelled && currentRun?.outcome == nil }
+
+  /// A fresh snapshot replaces the native AX registry, so recheck the selected target before using its ID.
+  private func validatedState(for action: AutomationAction, goal: String, selectedState: DesktopState) throws -> DesktopState? {
+    let fresh = try perception.snapshot(recentActions: history)
+    guard fresh.activeApplication?.processIdentifier == selectedState.activeApplication?.processIdentifier,
+      fresh.focusedWindowID == selectedState.focusedWindowID,
+      actionGenerator.candidates(for: goal, state: fresh).contains(where: { $0.action == action })
+    else { return nil }
+
+    switch action {
+    case .clickElement(let id, _), .focusElement(let id, _), .typeText(let id, _):
+      guard let old = selectedState.elements.first(where: { $0.id == id }),
+        let current = fresh.elements.first(where: { $0.id == id }), old == current
+      else { return nil }
+      if case .typeText = action {
+        guard fresh.focusedElementID == id && current.isFocused else { return nil }
+      }
+    case .closeWindow(let id, _):
+      guard let old = selectedState.windows.first(where: { $0.id == id }),
+        let current = fresh.windows.first(where: { $0.id == id }), old == current
+      else { return nil }
+    case .pressKey, .scrollUp, .scrollDown:
+      guard fresh.focusedElementID == selectedState.focusedElementID else { return nil }
+    case .openApp, .focusApp, .stop:
+      break
+    }
+    return fresh
+  }
 
   /// Observation and native execution stay on the main actor; network work suspends it.
   private func runLoop(goal: String, startingAt: Int, generation id: UUID) async {
@@ -147,6 +179,10 @@ public final class AutomationController: ObservableObject {
       guard isCurrent(id) else { return }
       status = .running(step: step)
       do {
+        if step == 1 {
+          try await prepareTarget(nil)
+          guard isCurrent(id) else { return }
+        }
         let state = try perception.snapshot(recentActions: history)
         latestState = state
         debugEvents.append(.init(kind: .observation, title: "Observed \(state.activeApplication?.name ?? "desktop")", detail: "\(state.windows.count) windows, \(state.elements.count) controls"))
@@ -160,13 +196,22 @@ public final class AutomationController: ObservableObject {
         guard isCurrent(id) else { return }
         latestDecision = decision
         debugEvents.append(.init(kind: .decision, title: decision.candidate.action.summary, detail: "\(decision.model) · \(decision.latencyMilliseconds) ms · \(Int(decision.confidence * 100))% confidence"))
-        let assessment = safetyPolicy.assess(action: decision.candidate.action, confidence: decision.confidence, state: state)
+        if case .stop = decision.candidate.action {
+          finish(.completed, status: .completed)
+          return
+        }
+        guard let fresh = try validatedState(for: decision.candidate.action, goal: goal, selectedState: state) else {
+          finish(.failed, status: .failed("The target changed. Start a new command."), detail: "Decision target changed before execution.")
+          return
+        }
+        let assessment = safetyPolicy.assess(action: decision.candidate.action, confidence: decision.confidence, state: fresh)
         debugEvents.append(.init(kind: .safety, title: assessment.disposition.rawValue, detail: assessment.reason))
         switch assessment.disposition {
         case .allow:
           if !(await execute(decision, generation: id)) { return }
         case .requireConfirmation:
           pendingConfirmation = .init(goal: goal, nextStep: step + 1, decision: decision, assessment: assessment)
+          latestState = fresh
           addEvent(.init(kind: .confirmation, title: decision.candidate.action.summary, detail: assessment.reason))
           status = .awaitingConfirmation
           return
@@ -195,8 +240,8 @@ public final class AutomationController: ObservableObject {
     guard isCurrent(id) else { return false }
     history.append(.init(action: decision.candidate.action, succeeded: result.succeeded, message: result.message))
     debugEvents.append(.init(kind: .execution, title: result.succeeded ? "Executed" : "Execution failed", detail: result.message))
-    addEvent(.init(kind: .action, title: decision.candidate.action.summary, detail: result.succeeded ? "Executed" : "Execution failed", succeeded: result.succeeded))
-    if !result.succeeded { finish(.failed, status: .failed(result.message), detail: "Native action failed.") }
+    addEvent(.init(kind: .action, title: decision.candidate.action.summary, detail: result.message, succeeded: result.succeeded))
+    if !result.succeeded { finish(.failed, status: .failed(result.message), detail: result.message) }
     return result.succeeded
   }
 

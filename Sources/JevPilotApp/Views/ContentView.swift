@@ -60,6 +60,7 @@ struct ContentView: View {
 /// Voice capture and the validated decision are the primary workspace surfaces.
 struct ControlView: View {
   @EnvironmentObject private var session: SessionCoordinator
+  @EnvironmentObject private var controller: AutomationController
   @EnvironmentObject private var store: RunStore
   @EnvironmentObject private var readiness: Readiness
   @State private var expected = ""
@@ -81,6 +82,9 @@ struct ControlView: View {
             if case .error(let message) = session.state {
               Text(message).font(.callout).foregroundStyle(PilotTheme.danger).textSelection(.enabled)
             }
+            if case .blocked(let message) = session.state {
+              Text(message).font(.callout).foregroundStyle(PilotTheme.danger).textSelection(.enabled)
+            }
             ListeningControls()
             if !session.transcript.isEmpty {
               PilotRule()
@@ -98,35 +102,56 @@ struct ControlView: View {
           }
         }
         if let error = store.errorMessage { Text(error).font(.callout).foregroundStyle(PilotTheme.danger) }
+        if let pending = controller.pendingConfirmation {
+          Surface {
+            VStack(alignment: .leading, spacing: 14) {
+              SectionCaption(title: "Confirm action")
+              Text(pending.decision.candidate.action.summary).font(PilotTheme.label(21)).textSelection(.enabled)
+              Text(pending.assessment.reason).font(.system(size: 12)).foregroundStyle(PilotTheme.muted)
+              HStack(spacing: 10) {
+                Button("Approve") { session.confirmPendingAction() }.buttonStyle(PilotButtonStyle(prominent: true))
+                Button("Reject") { session.rejectPendingAction() }.buttonStyle(PilotButtonStyle())
+              }
+            }
+          }
+        }
+        if let run = controller.currentRun, !run.events.isEmpty {
+          Surface {
+            VStack(alignment: .leading, spacing: 12) {
+              SectionCaption(title: "Run", trailing: run.outcome?.rawValue.capitalized ?? controller.status.label)
+              RunEventList(events: run.events)
+            }
+          }
+        }
         VStack(alignment: .leading, spacing: 16) {
-          SectionCaption(title: "Decision", trailing: "Preview only")
+          SectionCaption(title: "Decision", trailing: controller.status.label)
           PilotRule()
-          if let result = session.probeResult {
+          if let decision = controller.latestDecision {
             HStack(alignment: .top) {
               Image(systemName: "arrow.turn.down.right").foregroundStyle(PilotTheme.accent).accessibilityHidden(true)
-              Text(result.decision.candidate.action.summary).font(PilotTheme.label(21)).textSelection(.enabled)
+              Text(decision.candidate.action.summary).font(PilotTheme.label(21)).textSelection(.enabled)
               Spacer(minLength: 0)
             }
             HStack {
-              MetricView(title: "Confidence", value: result.decision.confidence.formatted(.percent.precision(.fractionLength(1))))
-              MetricView(title: "Candidates", value: "\(result.candidates.count)")
-              MetricView(title: "Latency", value: "\(result.decision.latencyMilliseconds) ms")
+              MetricView(title: "Confidence", value: decision.confidence.formatted(.percent.precision(.fractionLength(1))))
+              MetricView(title: "Candidates", value: "\(controller.availableActions.count)")
+              MetricView(title: "Latency", value: "\(decision.latencyMilliseconds) ms")
             }.padding(.vertical, 8)
-            Text(result.decision.model).font(PilotTheme.mono(10)).foregroundStyle(PilotTheme.muted)
+            Text(decision.model).font(PilotTheme.mono(10)).foregroundStyle(PilotTheme.muted)
             VStack(alignment: .leading, spacing: 4) {
-              ForEach(result.candidates) { candidate in
+              ForEach(controller.availableActions) { candidate in
                 HStack {
-                  Image(systemName: candidate.id == result.decision.candidate.id ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 11)).foregroundStyle(candidate.id == result.decision.candidate.id ? PilotTheme.accent : PilotTheme.line)
+                  Image(systemName: candidate.id == decision.candidate.id ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 11)).foregroundStyle(candidate.id == decision.candidate.id ? PilotTheme.accent : PilotTheme.line)
                     .accessibilityHidden(true)
                   Text(candidate.action.summary).lineLimit(2)
                   Spacer()
-                  Text((result.decision.probabilities[candidate.id] ?? 0).formatted(.percent.precision(.fractionLength(1))))
+                  Text((decision.probabilities[candidate.id] ?? 0).formatted(.percent.precision(.fractionLength(1))))
                     .font(PilotTheme.mono(11)).monospacedDigit()
-                }.font(.system(size: 12)).foregroundStyle(candidate.id == result.decision.candidate.id ? PilotTheme.text : PilotTheme.muted)
-                  .padding(12).background(candidate.id == result.decision.candidate.id ? PilotTheme.inset : .clear, in: RoundedRectangle(cornerRadius: 9))
+                }.font(.system(size: 12)).foregroundStyle(candidate.id == decision.candidate.id ? PilotTheme.text : PilotTheme.muted)
+                  .padding(12).background(candidate.id == decision.candidate.id ? PilotTheme.inset : .clear, in: RoundedRectangle(cornerRadius: 9))
                   .accessibilityElement(children: .combine)
-                  .accessibilityAddTraits(candidate.id == result.decision.candidate.id ? .isSelected : [])
+                  .accessibilityAddTraits(candidate.id == decision.candidate.id ? .isSelected : [])
               }
             }.textSelection(.enabled)
           } else {
@@ -167,7 +192,11 @@ struct ControlView: View {
     case .preparingModel: "Preparing."
     case .listening: "Listening."
     case .askingJev: "Asking Jev."
+    case .running: "Working."
+    case .awaitingConfirmation: "Your call."
     case .complete: "Complete."
+    case .rejected: "Rejected."
+    case .blocked: "Blocked."
     case .error: "Let’s reconnect."
     }
   }

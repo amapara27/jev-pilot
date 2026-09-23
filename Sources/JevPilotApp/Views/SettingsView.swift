@@ -24,7 +24,9 @@ struct SettingsView: View {
           HStack(spacing: 10) {
             Label("TypeSafe API key", systemImage: "key.horizontal").font(PilotTheme.label())
             Spacer()
-            if readiness.hasKey {
+            if readiness.hasDevelopmentKey {
+              Text("Dev key active").font(PilotTheme.mono(11)).foregroundStyle(PilotTheme.muted)
+            } else if readiness.hasKey {
               Button("Change API key") { openKeyEditor() }
                 .buttonStyle(PilotButtonStyle())
               if readiness.hasStoredKey {
@@ -38,6 +40,9 @@ struct SettingsView: View {
           }
           if !keyError.isEmpty {
             Text(keyError).font(.caption).foregroundStyle(PilotTheme.danger)
+          }
+          if let readinessError = readiness.keyError {
+            Text(readinessError).font(.caption).foregroundStyle(PilotTheme.danger)
           }
         }
 

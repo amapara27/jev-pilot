@@ -6,25 +6,31 @@ import JevPilotCore
 @testable import JevPilotApp
 
 @MainActor
-private final class PreviewProbe: GoalProbing {
-  func probe(goal: String) async throws -> JevGoalProbeResult {
-    let stop = ActionCandidate(id: "stop", action: .stop(reason: "done"), criterion: "The goal is already complete.")
-    let escape = ActionCandidate(id: "escape", action: .pressKey(.escape), criterion: "Dismiss the open surface.")
-    let decision = ActionDecision(
-      candidate: escape,
-      confidence: 0.81,
-      probabilities: ["stop": 0.19, "escape": 0.81],
-      model: "jev-preview",
-      latencyMilliseconds: 184
-    )
-    return JevGoalProbeResult(
-      goal: goal,
-      desktopState: .init(activeApplication: .init(name: "Safari"), isAccessibilityTrusted: true),
-      candidates: [stop, escape],
-      decision: decision,
-      requestMetric: .init(latencyMilliseconds: 184, inputTokens: 620, outputTokens: 8)
-    )
+private final class PreviewPerception: DesktopPerceiving {
+  func requestAccessibilityPermission(prompt: Bool) -> Bool { true }
+  func snapshot(recentActions: [ActionRecord]) throws -> DesktopState {
+    .init(activeApplication: .init(name: "Safari", processIdentifier: 42), isAccessibilityTrusted: true)
   }
+}
+private actor PreviewEngine: DecisionEngine {
+  let first: JevPilotCore.KeyPress
+  var calls = 0
+  init(first: JevPilotCore.KeyPress = .escape) { self.first = first }
+  func decide(goal: String, state: DesktopState, candidates: [ActionCandidate]) async throws -> ActionDecision {
+    calls += 1
+    let selected = candidates.first { candidate in
+      if calls == 1 { return candidate.action == .pressKey(first) }
+      if case .stop = candidate.action { return true }
+      return false
+    }!
+    return .init(candidate: selected, confidence: 0.81,
+      probabilities: Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0.id == selected.id ? 1.0 : 0.0) }),
+      model: "jev-preview", latencyMilliseconds: 184)
+  }
+}
+@MainActor
+private final class PreviewExecutor: ActionExecuting {
+  func execute(_ action: AutomationAction) async -> ExecutionResult { .init(succeeded: true, message: "Executed") }
 }
 @MainActor
 private final class PreviewSpeech: SpeechProviding {
@@ -44,12 +50,37 @@ final class LayoutTests: XCTestCase {
         existenceChecks += 1
         return true
       },
-      environmentKeyStatus: { false }
+      developmentKeyStatus: { false }
     )
     readiness.refresh()
     XCTAssertTrue(readiness.hasStoredKey)
     XCTAssertTrue(readiness.hasKey)
     XCTAssertEqual(existenceChecks, 1)
+  }
+
+  func testDevelopmentKeySkipsKeychainReadinessAndShowsItsSource() {
+    var keychainChecks = 0
+    let readiness = Readiness(
+      storedKeyStatus: { keychainChecks += 1; return true },
+      developmentKeyStatus: { true }
+    )
+    readiness.refresh()
+    XCTAssertTrue(readiness.hasKey)
+    XCTAssertTrue(readiness.hasDevelopmentKey)
+    XCTAssertFalse(readiness.hasStoredKey)
+    XCTAssertEqual(keychainChecks, 0)
+  }
+
+  func testInvalidDevelopmentFileDoesNotFallBackToKeychain() {
+    var keychainChecks = 0
+    let readiness = Readiness(
+      storedKeyStatus: { keychainChecks += 1; return true },
+      developmentKeyStatus: { throw DevelopmentAPIKeyError.missingKey }
+    )
+    readiness.refresh()
+    XCTAssertFalse(readiness.hasKey)
+    XCTAssertEqual(keychainChecks, 0)
+    XCTAssertEqual(readiness.probeBlocker, DevelopmentAPIKeyError.missingKey.localizedDescription)
   }
 
   func testRenderControlCenterSurfaces() async throws {
@@ -59,7 +90,8 @@ final class LayoutTests: XCTestCase {
     let destination = URL(fileURLWithPath: output)
     try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
     let store = RunStore(inMemory: true)
-    let session = SessionCoordinator(probe: PreviewProbe(), speech: PreviewSpeech(), defaults: nil)
+    let controller = AutomationController(perception: PreviewPerception(), actionGenerator: .init(supportedApplications: []), decisionEngine: PreviewEngine(), executor: PreviewExecutor(), store: store, stabilizationMilliseconds: 0)
+    let session = SessionCoordinator(controller: controller, speech: PreviewSpeech(), defaults: nil)
     session.runTyped("Dismiss the current dialog")
     for _ in 0..<100 where session.state != .complete {
       try await Task.sleep(for: .milliseconds(5))
@@ -74,7 +106,7 @@ final class LayoutTests: XCTestCase {
     record.requests = [.init(latencyMilliseconds: 210, inputTokens: 1650, outputTokens: 12)]
     store.upsert(record)
     func render<V: View>(_ name: String, _ view: V, width: CGFloat, height: CGFloat, dark: Bool = false) async throws {
-      let root = view.environmentObject(session).environmentObject(store).environmentObject(readiness)
+      let root = view.environmentObject(session).environmentObject(controller).environmentObject(store).environmentObject(readiness)
         .environment(\.colorScheme, dark ? .dark : .light)
         .background(dark ? Color(nsColor: .darkGray) : .white)
       let host = NSHostingView(rootView: root)
@@ -104,9 +136,19 @@ final class LayoutTests: XCTestCase {
       try await Task.sleep(for: .milliseconds(5))
     }
     try await render("control-listening", ContentView(), width: 1040, height: 730)
+    try await render("control-listening-dark", ContentView(), width: 1040, height: 730, dark: true)
     session.stop()
-    let emptySession = SessionCoordinator(probe: PreviewProbe(), speech: PreviewSpeech(), defaults: nil)
-    try await render("control-empty", ContentView().environmentObject(emptySession), width: 1040, height: 730)
+    let confirmController = AutomationController(perception: PreviewPerception(), actionGenerator: .init(supportedApplications: []), decisionEngine: PreviewEngine(first: .returnKey), executor: PreviewExecutor(), maximumSteps: 1, store: store, stabilizationMilliseconds: 0)
+    let confirmSession = SessionCoordinator(controller: confirmController, speech: PreviewSpeech(), defaults: nil)
+    confirmSession.runTyped("Press Return")
+    for _ in 0..<100 where confirmController.pendingConfirmation == nil {
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    try await render("control-confirmation", ContentView().environmentObject(confirmSession).environmentObject(confirmController), width: 1040, height: 730)
+    try await render("menu-confirmation", MenuBarPanel().environmentObject(confirmSession).environmentObject(confirmController), width: 330, height: 340)
+    let emptyController = AutomationController(perception: PreviewPerception(), actionGenerator: .init(supportedApplications: []), decisionEngine: PreviewEngine(), executor: PreviewExecutor(), store: store)
+    let emptySession = SessionCoordinator(controller: emptyController, speech: PreviewSpeech(), defaults: nil)
+    try await render("control-empty", ContentView().environmentObject(emptySession).environmentObject(emptyController), width: 1040, height: 730)
     try await render("usage", UsageView(), width: 780, height: 730)
     try await render("history", HistoryView(), width: 780, height: 650)
     try await render("history-narrow", HistoryView(), width: 600, height: 650)
@@ -114,7 +156,7 @@ final class LayoutTests: XCTestCase {
     try await render("settings-dark", SettingsView(), width: 470, height: 420, dark: true)
     try await render("menu-bar", MenuBarPanel(), width: 330, height: 260)
     try await render("menu-bar-dark", MenuBarPanel(), width: 330, height: 260, dark: true)
-    try await render("transcript", TranscriptHUD(session: session), width: 440, height: 90)
+    try await render("transcript", TranscriptHUD(session: session, controller: controller), width: 440, height: 90)
     try await render("startup-loading", StartupLoadingView(), width: 780, height: 580)
   }
 }

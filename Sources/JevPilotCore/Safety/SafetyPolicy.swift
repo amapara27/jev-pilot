@@ -75,13 +75,13 @@ public struct SafetyPolicy: Sendable {
     switch action {
     case .openApp, .focusApp, .focusElement, .scrollUp, .scrollDown, .stop:
       .low
-    case .pressKey(.returnKey):
+    case .pressKey(.returnKey), .pressKey(.space), .closeWindow:
       .high
     case .pressKey:
       .low
     case .clickElement(_, let label) where isHighRiskLabel(label):
       .high
-    case .clickElement, .typeText, .closeWindow:
+    case .clickElement, .typeText:
       .medium
     }
   }
@@ -117,7 +117,7 @@ public struct SafetyPolicy: Sendable {
 
   private func isHighRiskLabel(_ label: String?) -> Bool {
     guard let normalized = label?.lowercased() else { return false }
-    let terms = ["send", "submit", "post", "publish", "confirm", "approve"]
+    let terms = ["send", "submit", "post", "publish", "confirm", "approve", "delete", "remove", "trash", "erase"]
     return terms.contains(where: normalized.contains)
   }
 }

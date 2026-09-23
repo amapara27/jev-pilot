@@ -13,33 +13,54 @@ final class Readiness: ObservableObject {
   @Published var microphone = AVAuthorizationStatus.notDetermined
   @Published var hasKey = false
   @Published var hasStoredKey = false
+  @Published var hasDevelopmentKey = false
+  @Published var keyError: String?
 
   private let storedKeyStatus: () throws -> Bool
-  private let environmentKeyStatus: () -> Bool
+  private let developmentKeyStatus: () throws -> Bool
 
   init(
     storedKeyStatus: @escaping () throws -> Bool = {
       try KeychainAPIKeyStore().containsKey()
     },
-    environmentKeyStatus: @escaping () -> Bool = {
-      ProcessInfo.processInfo.environment["TYPESAFE_API_KEY"]?.isEmpty == false
+    developmentKeyStatus: @escaping () throws -> Bool = {
+      try DevelopmentAPIKey.loadOverride() != nil
     }
   ) {
     self.storedKeyStatus = storedKeyStatus
-    self.environmentKeyStatus = environmentKeyStatus
+    self.developmentKeyStatus = developmentKeyStatus
   }
 
   func refresh() {
     accessibility = AXIsProcessTrusted()
     microphone = AVCaptureDevice.authorizationStatus(for: .audio)
     do {
+      hasDevelopmentKey = try developmentKeyStatus()
+      keyError = nil
+    } catch {
+      hasDevelopmentKey = false
+      hasStoredKey = false
+      hasKey = false
+      keyError = error.localizedDescription
+      return
+    }
+    if hasDevelopmentKey {
+      // The explicit dev override must never query the saved Keychain item.
+      hasStoredKey = false
+      hasKey = true
+      return
+    }
+    do {
       hasStoredKey = try storedKeyStatus()
+      keyError = nil
     } catch {
       hasStoredKey = false
+      keyError = error.localizedDescription
     }
-    hasKey = hasStoredKey || environmentKeyStatus()
+    hasKey = hasStoredKey
   }
   var probeBlocker: String? {
+    if let keyError { return keyError }
     if !hasKey { return "Add your TypeSafe API key in Settings to ask Jev." }
     if !accessibility { return "Enable Accessibility to give Jev a live desktop snapshot." }
     return nil
@@ -100,9 +121,11 @@ final class AppModel: ObservableObject {
   let store: RunStore
   let startup: StorageStartupCoordinator
   let session: SessionCoordinator
+  let controller: AutomationController
   let readiness = Readiness()
   let target = DesktopTargetTracker()
   private var overlay: TranscriptPanel?
+  private var overlayHideTask: Task<Void, Never>?
   private var subscriptions = Set<AnyCancellable>()
 
   init() {
@@ -112,20 +135,17 @@ final class AppModel: ObservableObject {
     startup = StorageStartupCoordinator(loaders: [{ await store.load() }])
     let perception = AccessibilityPerception()
     let keyStore = KeychainAPIKeyStore()
-    let readiness = readiness
     let target = target
-    let probe = JevGoalProbe(
+    controller = AutomationController(
       perception: perception,
-      decisionEngine: JevDecisionEngine { try keyStore.loadFromKeychainOrEnvironment() },
-      readiness: {
-        readiness.refresh()
-        return readiness.probeBlocker
-      },
-      prepareTarget: { try await target.prepare(processIdentifier: nil) }
+      decisionEngine: JevDecisionEngine { try keyStore.loadFromDevelopmentOverrideOrKeychain() },
+      executor: MacOSActionExecutor(perception: perception),
+      store: store,
+      prepareTarget: { try await target.prepare(processIdentifier: $0) }
     )
-    session = SessionCoordinator(probe: probe, speech: FluidAudioSpeechRecognizer())
+    session = SessionCoordinator(controller: controller, speech: FluidAudioSpeechRecognizer())
     readiness.refresh()
-    overlay = TranscriptPanel(session: session)
+    overlay = TranscriptPanel(session: session, controller: controller)
     session.objectWillChange.sink { [weak self] in
       Task { @MainActor in self?.updateOverlay() }
     }.store(in: &subscriptions)
@@ -133,8 +153,16 @@ final class AppModel: ObservableObject {
     Task { await startup.load() }
   }
   private func updateOverlay() {
-    if session.showTranscript && session.state.isActive { overlay?.show() }
-    else { overlay?.hide() }
+    overlayHideTask?.cancel()
+    guard session.showTranscript else { overlay?.hide(); return }
+    if session.state.isActive { overlay?.show(); return }
+    guard !session.transcript.isEmpty else { overlay?.hide(); return }
+    overlay?.show()
+    overlayHideTask = Task { [weak self] in
+      try? await Task.sleep(for: .seconds(4))
+      guard !Task.isCancelled, let self, !self.session.state.isActive else { return }
+      self.overlay?.hide()
+    }
   }
 }
 
@@ -142,7 +170,7 @@ final class AppModel: ObservableObject {
 @MainActor
 final class TranscriptPanel {
   private let panel: NSPanel
-  init(session: SessionCoordinator) {
+  init(session: SessionCoordinator, controller: AutomationController) {
     panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 440, height: 90), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     panel.level = .floating
     panel.isOpaque = false
@@ -151,7 +179,7 @@ final class TranscriptPanel {
     panel.ignoresMouseEvents = true
     panel.hidesOnDeactivate = false
     panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-    panel.contentView = NSHostingView(rootView: TranscriptHUD(session: session))
+    panel.contentView = NSHostingView(rootView: TranscriptHUD(session: session, controller: controller))
   }
   func show() {
     guard !panel.isVisible else { return }

@@ -21,14 +21,14 @@ struct StatusIndicator: View {
   }
   private var color: Color {
     switch state {
-    case .preparingModel, .listening, .askingJev: PilotTheme.accent
+    case .preparingModel, .listening, .askingJev, .running, .awaitingConfirmation: PilotTheme.accent
     case .complete: PilotTheme.signal
-    case .error: PilotTheme.danger
-    case .stopped: PilotTheme.muted
+    case .error, .blocked: PilotTheme.danger
+    case .stopped, .rejected: PilotTheme.muted
     }
   }
   private var label: String {
-    switch state { case .error: "Needs attention"; case .stopped: "Standby"; default: state.label }
+    switch state { case .error: "Needs attention"; case .blocked: "Blocked"; case .stopped: "Standby"; default: state.label }
   }
 }
 
@@ -54,7 +54,9 @@ struct ListeningControls: View {
           Image(systemName: primaryIcon).accessibilityHidden(true)
           Text(primaryLabel)
           Spacer(minLength: 0)
-          Image(systemName: primaryTrailingIcon).font(.system(size: 10)).accessibilityHidden(true)
+          if !session.state.isActive {
+            Image(systemName: "arrow.up.right").font(.system(size: 10)).accessibilityHidden(true)
+          }
         }
       }.buttonStyle(PilotButtonStyle(prominent: true, destructive: isCancelling))
         .frame(maxWidth: compact ? .infinity : 205)
@@ -67,14 +69,13 @@ struct ListeningControls: View {
   private var isCancelling: Bool { session.state.isActive && !isListening }
   private var primaryLabel: String {
     if isListening { return "Finish recording" }
+    if session.state == .awaitingConfirmation { return "Stop run" }
+    if case .running = session.state { return "Stop run" }
     return session.state.isActive ? "Cancel" : "Start listening"
   }
   private var primaryIcon: String {
-    if isListening { return "checkmark" }
+    if isListening { return "stop.fill" }
     return session.state.isActive ? "xmark" : "mic"
-  }
-  private var primaryTrailingIcon: String {
-    session.state.isActive ? "arrow.down" : "arrow.up.right"
   }
   private var primaryHelp: String {
     if isListening { return "Finish recording and transcribe" }

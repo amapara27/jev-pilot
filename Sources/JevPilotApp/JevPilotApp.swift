@@ -11,6 +11,7 @@ struct JevPilotApp: App {
       StartupGate(startup: model.startup) { ContentView() }
         .environmentObject(model)
         .environmentObject(model.session)
+        .environmentObject(model.controller)
         .environmentObject(model.store)
         .environmentObject(model.readiness)
         .frame(minWidth: 780, minHeight: 580)
@@ -24,6 +25,7 @@ struct JevPilotApp: App {
     MenuBarExtra {
       StartupGate(startup: model.startup) { MenuBarPanel() }
         .environmentObject(model.session)
+        .environmentObject(model.controller)
         .environmentObject(model.store)
         .environmentObject(model.readiness)
     } label: {
