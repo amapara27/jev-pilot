@@ -11,6 +11,7 @@ struct SettingsView: View {
   @State private var keyError = ""
   @State private var isEditingKey = false
   @State private var removeKeyConfirmation = false
+  @AppStorage("terminalExecutionEnabled") private var terminalExecutionEnabled = false
   private let keyStore = KeychainAPIKeyStore()
 
   var body: some View {
@@ -53,6 +54,11 @@ struct SettingsView: View {
             .init(value: .slow1280, title: "Slow", detail: "1280 ms")
           ]).disabled(session.state.isActive)
           Toggle("Live transcript overlay", isOn: $session.showTranscript)
+            .toggleStyle(PilotToggleStyle())
+        }
+
+        SettingsSection(title: "Terminal") {
+          Toggle("Allow command execution with approval", isOn: $terminalExecutionEnabled)
             .toggleStyle(PilotToggleStyle())
         }
 

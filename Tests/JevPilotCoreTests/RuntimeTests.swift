@@ -26,9 +26,17 @@ private final class FakeExecutor: ActionExecuting {
   }
 }
 
+@MainActor
+private final class UnverifiedCompletion: ActionCompletionVerifying {
+  func verify(action: AutomationAction, before: DesktopState,
+    perception: DesktopPerceiving) async -> ExecutionResult {
+    .init(succeeded: false, message: "Could not verify effect.")
+  }
+}
+
 /// Can deliberately ignore cancellation to reproduce a response arriving after Stop.
 private actor FakeEngine: DecisionEngine {
-  enum Selection: Sendable { case stop, escape, enter, click, focus, failing }
+  enum Selection: Sendable { case stop, escape, enter, click, focus, focusEditor, terminalRun, failing }
   var calls = 0
   var goals: [String] = []
   var selection: Selection
@@ -57,6 +65,8 @@ private actor FakeEngine: DecisionEngine {
       case .enter: return candidate.action == .pressKey(.returnKey)
       case .click: if case .clickElement = candidate.action { return true }; return false
       case .focus: return candidate.action == .focusApp(bundleIdentifier: "test.terminal", name: "Terminal")
+      case .focusEditor: return candidate.action == .focusApp(bundleIdentifier: "one.editor", name: "Editor")
+      case .terminalRun: if case .terminalRun = candidate.action { return true }; return false
       case .failing: return false
       }
     }!
@@ -91,6 +101,9 @@ private actor FakeStreamingSpeechEngine: StreamingSpeechEngine {
   var processedSamples: [Float] = []
   var partial: (@Sendable (String) -> Void)?
   var eou: (@Sendable (String) -> Void)?
+  var eouOnSample: Float?
+  var trace: [String] = []
+  func setEouOnSample(_ sample: Float) { eouOnSample = sample }
   func prepare(
     preset: SpeechRecognitionPreset,
     progress: @escaping @Sendable (Double) -> Void
@@ -107,13 +120,18 @@ private actor FakeStreamingSpeechEngine: StreamingSpeechEngine {
     self.eou = eou
   }
   func process(_ buffer: AVAudioPCMBuffer) async throws {
-    processedSamples.append(buffer.floatChannelData?[0][0] ?? -1)
+    let sample = buffer.floatChannelData?[0][0] ?? -1
+    processedSamples.append(sample)
+    trace.append("process \(Int(sample))")
+    if sample == eouOnSample { eou?("first command") }
   }
   func finish() async throws -> String { "finished transcript" }
+  func reset() async { trace.append("reset") }
   func cancel() async {}
   func emitPartial(_ text: String) { partial?(text) }
   func emitFinal(_ text: String) { eou?(text) }
   func snapshot() -> ([SpeechRecognitionPreset], [Float]) { (prepared, processedSamples) }
+  func processingTrace() -> [String] { trace }
 }
 
 @MainActor
@@ -188,7 +206,7 @@ private final class ControlledStorageLoader {
 @MainActor
 final class RuntimeTests: XCTestCase {
   private func controller(_ engine: FakeEngine, perception: FakePerception = .init(), executor: FakeExecutor = .init(), maximumSteps: Int = 12) -> AutomationController {
-    AutomationController(perception: perception, actionGenerator: .init(supportedApplications: []), decisionEngine: engine, executor: executor, maximumSteps: maximumSteps, stabilizationMilliseconds: 0)
+    AutomationController(perception: perception, actionGenerator: .init(supportedApplications: []), decisionEngine: engine, executor: executor, maximumSteps: maximumSteps)
   }
   private func session(_ engine: FakeEngine, speech: FakeSpeech) -> SessionCoordinator {
     SessionCoordinator(controller: controller(engine), speech: speech, defaults: nil)
@@ -314,13 +332,29 @@ final class RuntimeTests: XCTestCase {
     session.startListening()
     await eventually { session.state == .listening }
     speech.emit("press escape", final: true)
-    await eventually { session.state == .complete }
+    await eventually { runtime.currentRun?.outcome == .completed }
     XCTAssertEqual(executor.actions, [.pressKey(.escape)])
     XCTAssertEqual(runtime.currentRun?.actionCount, 1)
     XCTAssertEqual(runtime.store.records.first?.outcome, .completed)
     XCTAssertEqual(runtime.currentRun?.requests.count, 2)
     let goals = await engine.goals
     XCTAssertEqual(goals, ["press escape", "press escape"])
+  }
+
+  func testUnverifiedEffectFailsRunAndPausesQueuedGoals() async {
+    let engine = FakeEngine(.escape)
+    let executor = FakeExecutor()
+    let runtime = AutomationController(perception: FakePerception(),
+      actionGenerator: .init(supportedApplications: []), decisionEngine: engine,
+      executor: executor, completionVerifier: UnverifiedCompletion())
+    let session = SessionCoordinator(controller: runtime, speech: FakeSpeech(), defaults: nil)
+    session.runTyped("press escape")
+    session.runTyped("next goal")
+    await eventually { runtime.currentRun?.outcome == .failed }
+    XCTAssertEqual(executor.actions, [.pressKey(.escape)])
+    XCTAssertTrue(session.queuePaused)
+    XCTAssertEqual(session.queuedGoals.map(\.text), ["next goal"])
+    XCTAssertEqual(runtime.currentRun?.events.last?.detail, "Could not verify effect.")
   }
 
   func testAutomaticallyAllowedActionCannotExecuteAfterTargetChanges() async {
@@ -359,7 +393,6 @@ final class RuntimeTests: XCTestCase {
     let runtime = AutomationController(
       perception: perception, actionGenerator: .init(supportedApplications: []),
       decisionEngine: FakeEngine(.enter), executor: executor, maximumSteps: 1,
-      stabilizationMilliseconds: 0,
       prepareTarget: { pid in
         restoredPIDs.append(pid)
         if let pid { perception.state.activeApplication = .init(name: "Editor", bundleIdentifier: "test.editor", processIdentifier: pid) }
@@ -402,7 +435,7 @@ final class RuntimeTests: XCTestCase {
     var restoreContinuation: CheckedContinuation<Void, Never>?
     let runtime = AutomationController(
       perception: perception, actionGenerator: .init(supportedApplications: []),
-      decisionEngine: engine, executor: FakeExecutor(), stabilizationMilliseconds: 0,
+      decisionEngine: engine, executor: FakeExecutor(),
       prepareTarget: { _ in await withCheckedContinuation { restoreContinuation = $0 } })
     runtime.run(goal: "press escape")
     await eventually { restoreContinuation != nil }
@@ -424,7 +457,7 @@ final class RuntimeTests: XCTestCase {
     XCTAssertEqual(runtime.currentRun?.outcome, .failed)
   }
 
-  func testFinalCommitsExactlyOnceAndPreservesGoal() async {
+  func testEachCompletedUtteranceQueuesOnceAndListeningContinues() async {
     let engine = FakeEngine()
     let speech = FakeSpeech()
     let session = session(engine, speech: speech)
@@ -432,11 +465,13 @@ final class RuntimeTests: XCTestCase {
     await eventually { speech.starts == 1 }
     speech.emit("  switch to Safari  ")
     speech.emit("  switch to Safari  ", final: true)
-    speech.emit("late duplicate", final: true)
-    await eventually { session.state == .complete }
+    await eventually { session.controller.currentRun?.outcome == .completed }
     let goals = await engine.goals
     XCTAssertEqual(goals, ["switch to Safari"])
     XCTAssertEqual(session.transcript, "switch to Safari")
+    XCTAssertEqual(session.captureState, .listening)
+    speech.emit("open Finder", final: true)
+    await eventually { session.controller.currentRun?.command == "open Finder" }
   }
 
   func testFluidAudioAdapterPreparesBeforeCaptureAndProcessesBuffersInOrder() async {
@@ -466,7 +501,8 @@ final class RuntimeTests: XCTestCase {
     XCTAssertEqual(snapshot.1, [1, 2, 3])
     await engine.emitPartial("hello")
     await engine.emitFinal("hello world")
-    await Task.yield()
+    audio.emit(4)
+    await eventually { events.contains("final:hello world") }
     XCTAssertTrue(events.contains("ready"))
     XCTAssertTrue(events.contains("partial:hello"))
     XCTAssertTrue(events.contains("final:hello world"))
@@ -487,7 +523,26 @@ final class RuntimeTests: XCTestCase {
     let snapshot = await engine.snapshot()
     XCTAssertEqual(snapshot.1, [7])
     XCTAssertEqual(finals, ["finished transcript"])
-    XCTAssertFalse(recognizer.isRecording)
+    XCTAssertTrue(recognizer.isRecording)
+    recognizer.stop()
+  }
+
+  func testEouResetsBetweenBuffersWithoutStoppingMicrophone() async {
+    let engine = FakeStreamingSpeechEngine()
+    await engine.setEouOnSample(2)
+    let audio = FakeAudioSource()
+    let recognizer = FluidAudioSpeechRecognizer(engine: engine, audioSource: audio)
+    var finals: [String] = []
+    recognizer.onEvent = { if case .transcript(let value, true) = $0 { finals.append(value) } }
+    await recognizer.start(preset: .balanced320)
+    audio.emit(1)
+    audio.emit(2)
+    audio.emit(3)
+    await eventually { finals == ["first command"] }
+    let trace = await engine.processingTrace()
+    XCTAssertEqual(trace, ["process 1", "process 2", "reset", "process 3"])
+    XCTAssertTrue(recognizer.isRecording)
+    recognizer.stop()
   }
 
   func testAudioTapHandlerRunsOutsideMainActor() async {
@@ -526,7 +581,7 @@ final class RuntimeTests: XCTestCase {
     session.startListening()
     await eventually { session.state == .listening }
     session.finishListening()
-    await eventually { session.state == .complete }
+    await eventually { session.controller.currentRun?.outcome == .completed }
     XCTAssertEqual(speech.finishes, 1)
     let goals = await engine.goals
     XCTAssertEqual(goals, ["open Safari"])
@@ -561,6 +616,186 @@ final class RuntimeTests: XCTestCase {
     XCTAssertEqual(goals, ["Preserve THIS punctuation!"])
     XCTAssertEqual(session.transcript, "Preserve THIS punctuation!")
     XCTAssertEqual(session.controller.currentRun?.command, "Preserve THIS punctuation!")
+  }
+
+  func testCompletedUtterancesQueueFIFOWhileListeningDuringJev() async {
+    let engine = FakeEngine(.stop, delayed: true)
+    let speech = FakeSpeech()
+    let session = session(engine, speech: speech)
+    session.startListening()
+    await eventually { session.captureState == .listening }
+    speech.emit("first command", final: true)
+    await eventually { session.activeGoal?.text == "first command" }
+    speech.emit("second command", final: true)
+    XCTAssertEqual(session.queuedGoals.map(\.text), ["second command"])
+    XCTAssertEqual(session.captureState, .listening)
+    await engine.setDelayed(false)
+    await engine.release()
+    await eventually { session.controller.currentRun?.command == "second command" && session.controller.currentRun?.outcome == .completed }
+    let goals = await engine.goals
+    XCTAssertEqual(goals, ["first command", "second command"])
+    XCTAssertEqual(speech.stops, 1) // Initial start invalidates any previous capture.
+  }
+
+  func testSpeechTimingStartsWithFirstPartialAndCaptureCanRestartAfterFailure() async {
+    let engine = FakeEngine()
+    let speech = FakeSpeech()
+    let session = session(engine, speech: speech)
+    session.startListening()
+    await eventually { session.captureState == .listening }
+    speech.emit("first partial")
+    speech.emit("finished words", final: true)
+    await eventually { session.controller.currentRun?.outcome == .completed }
+    XCTAssertTrue(session.controller.currentRun?.timings?.contains(where: { $0.stage == "speech" }) == true)
+    speech.onEvent?(.failed("microphone lost"))
+    if case .failed = session.captureState {} else { XCTFail("Expected capture failure") }
+    session.startListening()
+    await eventually { session.captureState == .listening }
+    session.stop()
+  }
+
+  func testQueueCapacityAndFailurePause() async {
+    let engine = FakeEngine(.failing, delayed: true)
+    let speech = FakeSpeech()
+    let session = session(engine, speech: speech)
+    session.startListening()
+    await eventually { session.captureState == .listening }
+    speech.emit("one", final: true)
+    await eventually { session.activeGoal != nil }
+    for index in 2...7 { speech.emit("command \(index)", final: true) }
+    XCTAssertEqual(session.queuedGoals.count, 5)
+    XCTAssertTrue(session.queuePaused)
+    for _ in 0..<100 {
+      if await engine.calls == 1 { break }
+      try? await Task.sleep(for: .milliseconds(2))
+    }
+    await engine.release()
+    await eventually { session.controller.currentRun?.outcome == .failed }
+    XCTAssertEqual(session.queuedGoals.count, 5)
+    session.stop()
+    XCTAssertTrue(session.queuedGoals.isEmpty)
+  }
+
+  func testCorrectionPausesBeforeNextEffectAndCanResume() async {
+    let engine = FakeEngine(.escape, delayed: true)
+    await engine.setSelections([.escape, .stop])
+    let executor = FakeExecutor()
+    let runtime = controller(engine, executor: executor)
+    let speech = FakeSpeech()
+    let session = SessionCoordinator(controller: runtime, speech: speech, defaults: nil)
+    session.startListening()
+    await eventually { session.captureState == .listening }
+    speech.emit("press escape", final: true)
+    await eventually { runtime.latestState != nil }
+    speech.emit("actually open Finder", final: true)
+    XCTAssertEqual(session.queuedGoals.map(\.text), ["open Finder"])
+    XCTAssertTrue(session.queuePaused)
+    await engine.setDelayed(false)
+    await engine.release()
+    await eventually { runtime.currentRun?.outcome == .stopped }
+    XCTAssertTrue(executor.actions.isEmpty)
+    session.resumeQueue()
+    await eventually { runtime.currentRun?.command == "open Finder" && runtime.currentRun?.outcome == .completed }
+  }
+
+  func testDuplicateInstalledNamesWaitForUserBeforeJev() async {
+    let engine = FakeEngine()
+    let perception = FakePerception()
+    let generator = ValidActionGenerator(supportedApplications: [
+      .init(name: "Editor", bundleIdentifiers: ["one.editor", "two.editor"])
+    ], applicationURL: { URL(fileURLWithPath: "/Applications/\($0).app") })
+    let runtime = AutomationController(perception: perception, actionGenerator: generator,
+      decisionEngine: engine, executor: FakeExecutor())
+    runtime.run(goal: "open Editor")
+    await eventually { runtime.appChoices.count == 2 }
+    let callsBefore = await engine.calls
+    XCTAssertEqual(callsBefore, 0)
+    runtime.chooseApplication(bundleIdentifier: "two.editor")
+    await eventually { runtime.currentRun?.outcome == .completed }
+    let callsAfter = await engine.calls
+    XCTAssertEqual(callsAfter, 1)
+  }
+
+  func testRunningAndNonRunningAppsWithSameNameAlsoRequireChoice() async {
+    let engine = FakeEngine(.focusEditor)
+    await engine.setSelections([.focusEditor, .stop])
+    let perception = FakePerception()
+    perception.state.runningApplications = [.init(name: "Editor", bundleIdentifier: "one.editor", processIdentifier: 42)]
+    let generator = ValidActionGenerator(supportedApplications: [
+      .init(name: "Editor", bundleIdentifiers: ["one.editor", "two.editor"])
+    ], applicationURL: { URL(fileURLWithPath: "/Applications/\($0).app") })
+    let runtime = AutomationController(perception: perception, actionGenerator: generator,
+      decisionEngine: engine, executor: FakeExecutor())
+    runtime.run(goal: "open Editor")
+    await eventually { runtime.appChoices.count == 2 }
+    let callsBefore = await engine.calls
+    XCTAssertEqual(callsBefore, 0)
+    runtime.chooseApplication(bundleIdentifier: "one.editor")
+    await eventually { runtime.currentRun?.outcome == .completed }
+    let callsAfter = await engine.calls
+    XCTAssertEqual(callsAfter, 2)
+  }
+
+  func testEditedTerminalApprovalIsRequeuedForFreshJevChoice() async {
+    let engine = FakeEngine(.terminalRun)
+    let perception = FakePerception()
+    perception.state = DesktopState(activeApplication: .init(name: "Terminal", bundleIdentifier: "com.apple.Terminal", processIdentifier: 123), isAccessibilityTrusted: true)
+    let runtime = AutomationController(perception: perception,
+      actionGenerator: .init(supportedApplications: [], terminalExecutionEnabled: { true }),
+      decisionEngine: engine, executor: FakeExecutor())
+    let session = SessionCoordinator(controller: runtime, speech: FakeSpeech(), defaults: nil)
+    session.runTyped("run command pwd")
+    await eventually { runtime.pendingConfirmation != nil }
+    session.revisePendingTerminalCommand("git status")
+    XCTAssertNil(runtime.pendingConfirmation)
+    await eventually { runtime.pendingConfirmation?.decision.candidate.action == .terminalRun(command: "git status") }
+    XCTAssertFalse(session.queuePaused)
+    let goals = await engine.goals
+    XCTAssertEqual(goals, ["run command pwd", "run command git status"])
+  }
+
+  func testActionCompletionChecksImmediatelyAndTimesOutWithoutEffect() async {
+    let perception = FakePerception()
+    let before = perception.state
+    let verifier = DesktopActionCompletionVerifier(timeout: .milliseconds(120))
+    verifier.prepare(action: .focusElement(elementID: "field", label: nil), before: before)
+    perception.state.focusedElementID = "field"
+    let result = await verifier.verify(action: .focusElement(elementID: "field", label: nil), before: before, perception: perception)
+    XCTAssertTrue(result.succeeded)
+    perception.state = before
+    verifier.prepare(action: .focusElement(elementID: "field", label: nil), before: before)
+    let missing = await verifier.verify(action: .focusElement(elementID: "field", label: nil), before: before, perception: perception)
+    XCTAssertFalse(missing.succeeded)
+  }
+
+  func testCompletionPollingFindsEffectWhenNoNotificationArrives() async {
+    let perception = FakePerception()
+    let before = perception.state
+    let verifier = DesktopActionCompletionVerifier(timeout: .milliseconds(300))
+    verifier.prepare(action: .focusElement(elementID: "field", label: nil), before: before)
+    Task { @MainActor in
+      try? await Task.sleep(for: .milliseconds(70))
+      perception.state.focusedElementID = "field"
+    }
+    let result = await verifier.verify(action: .focusElement(elementID: "field", label: nil),
+      before: before, perception: perception)
+    XCTAssertTrue(result.succeeded)
+    XCTAssertGreaterThan(perception.snapshotCalls, 1)
+  }
+
+  func testFinderOpenRequiresTheExpectedItemNotJustAnyAppSwitch() async {
+    let perception = FakePerception()
+    perception.state = DesktopState(activeApplication: .init(name: "Finder",
+      bundleIdentifier: "com.apple.finder", processIdentifier: 2))
+    let before = perception.state
+    let verifier = DesktopActionCompletionVerifier(timeout: .milliseconds(100))
+    verifier.prepare(action: .finderOpenItem(elementID: "item", url: "/tmp/report.pdf"), before: before)
+    perception.state = DesktopState(activeApplication: .init(name: "Safari",
+      bundleIdentifier: "com.apple.Safari", processIdentifier: 3),
+      windows: [.init(id: "new", title: "Unrelated", role: "AXWindow", isFocused: true)])
+    let result = await verifier.verify(action: .finderOpenItem(elementID: "item", url: "/tmp/report.pdf"),
+      before: before, perception: perception)
+    XCTAssertFalse(result.succeeded)
   }
 
   func testStartUsesSelectedPresetAndSurfacesAutomaticPreparationProgress() async {
@@ -665,7 +900,7 @@ final class RuntimeTests: XCTestCase {
     let runtime = AutomationController(
       perception: FakePerception(), actionGenerator: .init(supportedApplications: []),
       decisionEngine: JevDecisionEngine(apiKeyProvider: { key }), executor: executor,
-      maximumSteps: 1, stabilizationMilliseconds: 0)
+      maximumSteps: 1)
     runtime.run(goal: "Press Escape in the current app")
     for _ in 0..<600 {
       if runtime.currentRun?.requests.first?.isComplete == true { break }

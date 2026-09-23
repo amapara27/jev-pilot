@@ -31,12 +31,19 @@ public final class AccessibilityPerception: DesktopPerceiving {
     guard let frontmost = NSWorkspace.shared.frontmostApplication else {
       throw PerceptionError.noFrontmostApplication
     }
-    guard frontmost.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
-      throw PerceptionError.controlCenterIsFrontmost
-    }
     observedProcessIdentifier = frontmost.processIdentifier
-
     elementRegistry.removeAll(keepingCapacity: true)
+    let runningApplications = NSWorkspace.shared.runningApplications
+      .filter { $0.activationPolicy == .regular && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+      .compactMap { application -> ApplicationState? in
+        guard let name = application.localizedName else { return nil }
+        return ApplicationState(name: name, bundleIdentifier: application.bundleIdentifier, processIdentifier: application.processIdentifier)
+      }
+      .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    // A voice command may launch an app even when the control center is the only frontmost app.
+    if frontmost.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+      return DesktopState(runningApplications: runningApplications, isAccessibilityTrusted: true, recentActions: Array(recentActions.suffix(8)))
+    }
     let appElement = AXUIElementCreateApplication(frontmost.processIdentifier)
     let focusedWindow = elementAttribute(appElement, kAXFocusedWindowAttribute)
     let focusedElement = elementAttribute(appElement, kAXFocusedUIElementAttribute)
@@ -50,7 +57,10 @@ public final class AccessibilityPerception: DesktopPerceiving {
             id: id,
             title: stringAttribute(window, kAXTitleAttribute),
             role: stringAttribute(window, kAXRoleAttribute) ?? "AXWindow",
-            isFocused: focusedWindow.map { CFEqual($0, window) } ?? false
+            isFocused: focusedWindow.map { CFEqual($0, window) } ?? false,
+            isMinimized: boolAttribute(window, kAXMinimizedAttribute) ?? false,
+            isFullScreen: boolAttribute(window, "AXFullScreen"),
+            url: filePath(for: window)
           ))
       }
     }
@@ -61,20 +71,16 @@ public final class AccessibilityPerception: DesktopPerceiving {
       path: "root",
       depth: 0,
       focusedElement: focusedElement,
+      limit: maximumElements,
       output: &elements
     )
-
-    let runningApplications = NSWorkspace.shared.runningApplications
-      .filter { $0.activationPolicy == .regular && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
-      .compactMap { application -> ApplicationState? in
-        guard let name = application.localizedName else { return nil }
-        return ApplicationState(
-          name: name,
-          bundleIdentifier: application.bundleIdentifier,
-          processIdentifier: application.processIdentifier
-        )
-      }
-      .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    if let menuBar = elementAttribute(appElement, kAXMenuBarAttribute) {
+      // Reserve a small independent budget so large windows cannot hide the menu bar.
+      var menus: [UIElementState] = []
+      walk(element: menuBar, path: "menu", depth: 0, focusedElement: focusedElement,
+        limit: 40, output: &menus)
+      elements.append(contentsOf: menus)
+    }
 
     return DesktopState(
       activeApplication: ApplicationState(
@@ -102,9 +108,10 @@ public final class AccessibilityPerception: DesktopPerceiving {
     path: String,
     depth: Int,
     focusedElement: AXUIElement?,
+    limit: Int,
     output: inout [UIElementState]
   ) {
-    guard depth <= maximumDepth, output.count < maximumElements else { return }
+    guard depth <= maximumDepth, output.count < limit else { return }
 
     let role = stringAttribute(element, kAXRoleAttribute) ?? "AXUnknown"
     let actions = actionNames(element)
@@ -116,9 +123,14 @@ public final class AccessibilityPerception: DesktopPerceiving {
       kAXTextFieldRole as String,
       kAXTextAreaRole as String,
       kAXMenuItemRole as String,
+      kAXMenuBarRole as String,
+      kAXMenuBarItemRole as String,
+      kAXMenuRole as String,
       kAXPopUpButtonRole as String,
       kAXComboBoxRole as String,
       kAXTabGroupRole as String,
+      kAXRowRole as String,
+      kAXCellRole as String,
       "AXLink",
       kAXSliderRole as String,
       kAXScrollAreaRole as String,
@@ -126,7 +138,8 @@ public final class AccessibilityPerception: DesktopPerceiving {
       "AXHeading",
     ]
 
-    if interactiveRoles.contains(role) || !actions.isEmpty {
+    let itemURL = filePath(for: element)
+    if interactiveRoles.contains(role) || !actions.isEmpty || itemURL != nil {
       output.append(
         UIElementState(
           id: id,
@@ -137,17 +150,20 @@ public final class AccessibilityPerception: DesktopPerceiving {
           isEnabled: boolAttribute(element, kAXEnabledAttribute) ?? true,
           isFocused: focusedElement.map { CFEqual($0, element) } ?? false,
           supportedActions: actions,
-          depth: depth
+          depth: depth,
+          url: itemURL,
+          isSelected: boolAttribute(element, kAXSelectedAttribute) ?? false
         ))
     }
 
     guard let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] else { return }
-    for (index, child) in children.enumerated() where output.count < maximumElements {
+    for (index, child) in children.enumerated() where output.count < limit {
       walk(
         element: child,
         path: "\(path).\(index)",
         depth: depth + 1,
         focusedElement: focusedElement,
+        limit: limit,
         output: &output
       )
     }
@@ -177,6 +193,16 @@ public final class AccessibilityPerception: DesktopPerceiving {
     if let string = value as? String { return String(string.prefix(240)) }
     if let number = value as? NSNumber { return number.stringValue }
     return role == (kAXTextFieldRole as String) ? "<unavailable>" : nil
+  }
+
+  private func filePath(for element: AXUIElement) -> String? {
+    guard let value = attribute(element, kAXURLAttribute) else { return nil }
+    if let url = value as? URL, url.isFileURL { return url.path }
+    if let string = value as? String {
+      if string.hasPrefix("/") { return string }
+      if let url = URL(string: string), url.isFileURL { return url.path }
+    }
+    return nil
   }
 
   private func actionNames(_ element: AXUIElement) -> [String] {

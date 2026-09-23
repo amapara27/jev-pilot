@@ -72,6 +72,17 @@ struct HistoryView: View {
                   MetricView(title: "Est. cost", value: run.hasIncompleteUsage && run.estimatedCost == 0 ? "—" : costLabel(run.estimatedCost))
                 }
                 if run.hasIncompleteUsage { Text("Some usage unavailable").font(.caption).foregroundStyle(PilotTheme.muted) }
+                if let timings = run.timings, !timings.isEmpty {
+                  PilotRule()
+                  SectionCaption(title: "Timing")
+                  ForEach(Array(timings.enumerated()), id: \.offset) { _, timing in
+                    HStack {
+                      Text(timing.step == 0 ? timing.stage : "\(timing.stage) · step \(timing.step)")
+                      Spacer()
+                      Text("\(timing.milliseconds) ms").monospacedDigit()
+                    }.font(PilotTheme.mono(10)).foregroundStyle(PilotTheme.muted)
+                  }
+                }
                 PilotRule()
                 SectionCaption(title: "Action trail")
                 RunEventList(events: run.events)

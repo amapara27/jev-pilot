@@ -65,4 +65,40 @@ final class SafetyPolicyTests: XCTestCase {
     XCTAssertNotNil(policy.blockedReason(forGoal: "type my password into the login field"))
     XCTAssertNil(policy.blockedReason(forGoal: "switch back to Terminal"))
   }
+
+  func testTerminalExecutionAndFinderMoveAlwaysRequireApproval() {
+    let state = DesktopState()
+    XCTAssertEqual(policy.assess(action: .terminalType(command: "pwd"), confidence: 1, state: state).disposition, .allow)
+    for action: AutomationAction in [
+      .terminalRun(command: "pwd"),
+      .finderMoveItem(elementID: "item", url: "/tmp/a", destination: "/tmp/b"),
+      .finderRenameItem(elementID: "item", url: "/tmp/a", newName: "b"),
+    ] {
+      XCTAssertEqual(policy.assess(action: action, confidence: 1, state: state).disposition, .requireConfirmation)
+    }
+  }
+
+  func testMultilineTerminalTextCannotBypassRunApproval() {
+    let state = DesktopState()
+    for action: AutomationAction in [
+      .terminalType(command: "echo safe\nrm -f file"),
+      .terminalRun(command: "echo safe\nrm -f file"),
+    ] {
+      XCTAssertEqual(policy.assess(action: action, confidence: 1, state: state).disposition, .deny)
+    }
+    let terminal = DesktopState(activeApplication: .init(name: "Terminal",
+      bundleIdentifier: "com.apple.Terminal", processIdentifier: 1))
+    XCTAssertEqual(policy.assess(action: .typeText(elementID: "field", text: "pwd\n"),
+      confidence: 1, state: terminal).disposition, .deny)
+  }
+
+  func testDestructiveMenuAndExecutableFinderItemRequireApproval() {
+    let state = DesktopState()
+    XCTAssertEqual(policy.assess(action: .activateMenu(elementID: "menu", label: "Delete"),
+      confidence: 1, state: state).disposition, .requireConfirmation)
+    XCTAssertEqual(policy.assess(action: .finderOpenItem(elementID: "app", url: "/tmp/Test.app"),
+      confidence: 1, state: state).disposition, .requireConfirmation)
+    XCTAssertEqual(policy.assess(action: .typeText(elementID: "field", text: "hello\n"),
+      confidence: 1, state: state).disposition, .requireConfirmation)
+  }
 }

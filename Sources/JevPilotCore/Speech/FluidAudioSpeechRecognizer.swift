@@ -88,7 +88,12 @@ protocol StreamingSpeechEngine: Sendable {
   ) async throws
   func process(_ buffer: AVAudioPCMBuffer) async throws
   func finish() async throws -> String
+  func reset() async
   func cancel() async
+}
+
+extension StreamingSpeechEngine {
+  func reset() async {}
 }
 
 /// Isolates microphone permissions and tap delivery for deterministic capture tests.
@@ -139,6 +144,8 @@ private actor ParakeetEngine: StreamingSpeechEngine {
     return try await manager.finish()
   }
 
+  func reset() async { await manager?.reset() }
+
   func cancel() async {
     await manager?.reset()
   }
@@ -183,6 +190,27 @@ private final class CopiedAudioBuffer: @unchecked Sendable {
   }
 }
 
+/// A bounded counter prevents a slow decoder from silently accumulating unlimited audio.
+private final class AudioBacklog: @unchecked Sendable {
+  private let lock = NSLock()
+  private var pending = 0
+  private let limit = 220
+  func accept() -> Bool { lock.withLock { guard pending < limit else { return false }; pending += 1; return true } }
+  func consumed() { lock.withLock { pending = max(0, pending - 1) } }
+}
+
+private final class EndOfUtteranceBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var text: String?
+  func set(_ value: String) { lock.withLock { text = value } }
+  func take() -> String? { lock.withLock { defer { text = nil }; return text } }
+}
+
+private enum AudioInput: @unchecked Sendable {
+  case buffer(AVAudioPCMBuffer)
+  case finish(CheckedContinuation<Void, Never>)
+}
+
 /// Builds the realtime callback outside MainActor so Core Audio can invoke it safely.
 func makeAudioTapHandler(
   deliver: @escaping @Sendable (AVAudioPCMBuffer) -> Void
@@ -195,9 +223,14 @@ func makeAudioTapHandler(
 
 /// Builds the stream yield closure outside MainActor for the same executor boundary.
 private func makeAudioStreamHandler(
-  continuation: AsyncStream<AVAudioPCMBuffer>.Continuation
+  continuation: AsyncStream<AudioInput>.Continuation,
+  backlog: AudioBacklog,
+  overflow: @escaping @Sendable () -> Void
 ) -> @Sendable (AVAudioPCMBuffer) -> Void {
-  { buffer in continuation.yield(buffer) }
+  { buffer in
+    guard backlog.accept() else { overflow(); return }
+    continuation.yield(.buffer(buffer))
+  }
 }
 
 /// Produces immutable copies from the realtime audio tap.
@@ -240,7 +273,7 @@ public final class FluidAudioSpeechRecognizer: ObservableObject, SpeechProviding
   private let audioSource: any SpeechAudioSource
   private var generation = UUID()
   private var processingTask: Task<Void, Never>?
-  private var continuation: AsyncStream<AVAudioPCMBuffer>.Continuation?
+  private var continuation: AsyncStream<AudioInput>.Continuation?
 
   public convenience init() {
     self.init(engine: ParakeetEngine(), audioSource: MicrophoneAudioSource())
@@ -261,24 +294,40 @@ public final class FluidAudioSpeechRecognizer: ObservableObject, SpeechProviding
     guard microphone else { fail("Microphone permission is required.", generation: id); return }
 
     do {
+      let eouBox = EndOfUtteranceBox()
       try await engine.configure(
         partial: { [weak self] text in
           Task { @MainActor in self?.publish(text, isFinal: false, generation: id) }
         },
-        eou: { [weak self] text in
-          Task { @MainActor in self?.publish(text, isFinal: true, generation: id) }
-        }
+        eou: { text in eouBox.set(text) }
       )
       guard generation == id, !Task.isCancelled else { return }
-      let pair = AsyncStream<AVAudioPCMBuffer>.makeStream(
+      let pair = AsyncStream<AudioInput>.makeStream(
         bufferingPolicy: .unbounded
       )
+      let backlog = AudioBacklog()
       continuation = pair.continuation
       processingTask = Task { [weak self, engine] in
         do {
-          for await buffer in pair.stream {
+          for await input in pair.stream {
             try Task.checkCancellation()
-            try await engine.process(buffer)
+            switch input {
+            case .buffer(let buffer):
+              defer { backlog.consumed() }
+              try await engine.process(buffer)
+              if let text = eouBox.take() {
+                await engine.reset()
+                self?.publish(text, isFinal: true, generation: id)
+              }
+            case .finish(let continuation):
+              defer { continuation.resume() }
+              let text = try await engine.finish()
+              _ = eouBox.take()
+              await engine.reset()
+              if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                self?.publish(text, isFinal: true, generation: id)
+              }
+            }
           }
         } catch is CancellationError {
         } catch {
@@ -286,7 +335,9 @@ public final class FluidAudioSpeechRecognizer: ObservableObject, SpeechProviding
         }
       }
       try audioSource.start(
-        onBuffer: makeAudioStreamHandler(continuation: pair.continuation)
+        onBuffer: makeAudioStreamHandler(continuation: pair.continuation, backlog: backlog) { [weak self] in
+          Task { @MainActor in self?.fail("Speech processing fell behind. Listening stopped; please start again.", generation: id) }
+        }
       )
       isRecording = true
       onEvent?(.ready)
@@ -295,26 +346,12 @@ public final class FluidAudioSpeechRecognizer: ObservableObject, SpeechProviding
     }
   }
 
-  /// Drains captured buffers and commits FluidAudio's best transcript once.
+  /// Commits the current utterance on the ordered stream while capture continues.
   public func finish() async {
     let id = generation
-    guard isRecording else { return }
-    audioSource.stop()
-    continuation?.finish()
-    continuation = nil
-    let pending = processingTask
-    processingTask = nil
-    await pending?.value
-    guard generation == id, !Task.isCancelled else { return }
-    do {
-      let transcript = try await engine.finish()
-      guard generation == id, !Task.isCancelled else { return }
-      isRecording = false
-      publish(transcript, isFinal: true, generation: id)
-    } catch is CancellationError {
-    } catch {
-      fail("Transcription could not finish: \(error.localizedDescription)", generation: id)
-    }
+    guard isRecording, let continuation else { return }
+    await withCheckedContinuation { done in continuation.yield(.finish(done)) }
+    guard generation == id else { return }
   }
 
   /// Stop invalidates every callback and discards partial speech without finalizing it.

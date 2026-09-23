@@ -55,12 +55,18 @@ public struct WindowState: Codable, Equatable, Sendable, Identifiable {
   public let title: String?
   public let role: String
   public let isFocused: Bool
+  public let isMinimized: Bool
+  public let isFullScreen: Bool?
+  public let url: String?
 
-  public init(id: String, title: String?, role: String, isFocused: Bool) {
+  public init(id: String, title: String?, role: String, isFocused: Bool, isMinimized: Bool = false, isFullScreen: Bool? = nil, url: String? = nil) {
     self.id = id
     self.title = title
     self.role = role
     self.isFocused = isFocused
+    self.isMinimized = isMinimized
+    self.isFullScreen = isFullScreen
+    self.url = url
   }
 }
 
@@ -75,6 +81,8 @@ public struct UIElementState: Codable, Equatable, Sendable, Identifiable {
   public let isFocused: Bool
   public let supportedActions: [String]
   public let depth: Int
+  public let url: String?
+  public let isSelected: Bool
 
   public init(
     id: String,
@@ -85,7 +93,9 @@ public struct UIElementState: Codable, Equatable, Sendable, Identifiable {
     isEnabled: Bool = true,
     isFocused: Bool = false,
     supportedActions: [String] = [],
-    depth: Int = 0
+    depth: Int = 0,
+    url: String? = nil,
+    isSelected: Bool = false
   ) {
     self.id = id
     self.role = role
@@ -96,6 +106,8 @@ public struct UIElementState: Codable, Equatable, Sendable, Identifiable {
     self.isFocused = isFocused
     self.supportedActions = supportedActions
     self.depth = depth
+    self.url = url
+    self.isSelected = isSelected
   }
 }
 

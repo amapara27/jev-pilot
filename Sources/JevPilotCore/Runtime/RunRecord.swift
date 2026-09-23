@@ -54,6 +54,16 @@ public struct RunEvent: Codable, Equatable, Sendable, Identifiable {
   }
 }
 
+/// Compact stage duration for comparing speech and action latency across runs.
+public struct StageTiming: Codable, Equatable, Sendable {
+  public let stage: String
+  public let step: Int
+  public let milliseconds: Int
+  public init(stage: String, step: Int, milliseconds: Int) {
+    self.stage = stage; self.step = step; self.milliseconds = milliseconds
+  }
+}
+
 /// The persisted record contains no AX state, raw provider payloads, or audio.
 public struct RunRecord: Codable, Equatable, Sendable, Identifiable {
   public var id = UUID()
@@ -63,6 +73,7 @@ public struct RunRecord: Codable, Equatable, Sendable, Identifiable {
   public var outcome: RunOutcome?
   public var events: [RunEvent] = []
   public var requests: [RequestMetric] = []
+  public var timings: [StageTiming]? = nil
   public var pricing: TokenPricing
   public init(command: String, pricing: TokenPricing = .init()) {
     self.command = command

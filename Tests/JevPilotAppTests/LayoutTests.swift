@@ -90,7 +90,7 @@ final class LayoutTests: XCTestCase {
     let destination = URL(fileURLWithPath: output)
     try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
     let store = RunStore(inMemory: true)
-    let controller = AutomationController(perception: PreviewPerception(), actionGenerator: .init(supportedApplications: []), decisionEngine: PreviewEngine(), executor: PreviewExecutor(), store: store, stabilizationMilliseconds: 0)
+    let controller = AutomationController(perception: PreviewPerception(), actionGenerator: .init(supportedApplications: []), decisionEngine: PreviewEngine(), executor: PreviewExecutor(), store: store)
     let session = SessionCoordinator(controller: controller, speech: PreviewSpeech(), defaults: nil)
     session.runTyped("Dismiss the current dialog")
     for _ in 0..<100 where session.state != .complete {
@@ -138,7 +138,7 @@ final class LayoutTests: XCTestCase {
     try await render("control-listening", ContentView(), width: 1040, height: 730)
     try await render("control-listening-dark", ContentView(), width: 1040, height: 730, dark: true)
     session.stop()
-    let confirmController = AutomationController(perception: PreviewPerception(), actionGenerator: .init(supportedApplications: []), decisionEngine: PreviewEngine(first: .returnKey), executor: PreviewExecutor(), maximumSteps: 1, store: store, stabilizationMilliseconds: 0)
+    let confirmController = AutomationController(perception: PreviewPerception(), actionGenerator: .init(supportedApplications: []), decisionEngine: PreviewEngine(first: .returnKey), executor: PreviewExecutor(), maximumSteps: 1, store: store)
     let confirmSession = SessionCoordinator(controller: confirmController, speech: PreviewSpeech(), defaults: nil)
     confirmSession.runTyped("Press Return")
     for _ in 0..<100 where confirmController.pendingConfirmation == nil {
@@ -156,7 +156,7 @@ final class LayoutTests: XCTestCase {
     try await render("settings-dark", SettingsView(), width: 470, height: 420, dark: true)
     try await render("menu-bar", MenuBarPanel(), width: 330, height: 260)
     try await render("menu-bar-dark", MenuBarPanel(), width: 330, height: 260, dark: true)
-    try await render("transcript", TranscriptHUD(session: session, controller: controller), width: 440, height: 90)
+    try await render("transcript", TranscriptHUD(session: session, controller: controller), width: 440, height: 126)
     try await render("startup-loading", StartupLoadingView(), width: 780, height: 580)
   }
 }

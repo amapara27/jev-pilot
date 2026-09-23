@@ -29,7 +29,7 @@ struct JevPilotApp: App {
         .environmentObject(model.store)
         .environmentObject(model.readiness)
     } label: {
-      MenuBarIcon(session: model.session)
+      MenuBarIcon(session: model.session, controller: model.controller)
     }
     .menuBarExtraStyle(.window)
     Settings {

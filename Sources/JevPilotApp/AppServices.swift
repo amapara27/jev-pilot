@@ -101,7 +101,12 @@ final class DesktopTargetTracker {
       throw TargetError.unavailable
     }
     if frontmost?.processIdentifier == pid { return }
-    guard app.activate(options: [.activateAllWindows]) else { throw TargetError.unavailable }
+    guard let url = app.bundleURL else { throw TargetError.unavailable }
+    let options = NSWorkspace.OpenConfiguration()
+    options.activates = true
+    options.allowsRunningApplicationSubstitution = true
+    let activated = try await NSWorkspace.shared.openApplication(at: url, configuration: options)
+    guard activated.processIdentifier == pid else { throw TargetError.unavailable }
     for _ in 0..<20 {
       try Task.checkCancellation()
       if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid { return }
@@ -136,14 +141,20 @@ final class AppModel: ObservableObject {
     let perception = AccessibilityPerception()
     let keyStore = KeychainAPIKeyStore()
     let target = target
+    let actionGenerator = ValidActionGenerator(terminalExecutionEnabled: {
+      UserDefaults.standard.bool(forKey: "terminalExecutionEnabled")
+    })
     controller = AutomationController(
       perception: perception,
+      actionGenerator: actionGenerator,
       decisionEngine: JevDecisionEngine { try keyStore.loadFromDevelopmentOverrideOrKeychain() },
       executor: MacOSActionExecutor(perception: perception),
       store: store,
+      completionVerifier: DesktopActionCompletionVerifier(),
       prepareTarget: { try await target.prepare(processIdentifier: $0) }
     )
     session = SessionCoordinator(controller: controller, speech: FluidAudioSpeechRecognizer())
+    Task { await actionGenerator.prepareInstalledApplications() }
     readiness.refresh()
     overlay = TranscriptPanel(session: session, controller: controller)
     session.objectWillChange.sink { [weak self] in
@@ -171,7 +182,7 @@ final class AppModel: ObservableObject {
 final class TranscriptPanel {
   private let panel: NSPanel
   init(session: SessionCoordinator, controller: AutomationController) {
-    panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 440, height: 90), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 440, height: 126), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     panel.level = .floating
     panel.isOpaque = false
     panel.backgroundColor = .clear

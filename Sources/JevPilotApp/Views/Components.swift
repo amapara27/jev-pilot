@@ -21,7 +21,7 @@ struct StatusIndicator: View {
   }
   private var color: Color {
     switch state {
-    case .preparingModel, .listening, .askingJev, .running, .awaitingConfirmation: PilotTheme.accent
+    case .preparingModel, .listening, .askingJev, .running, .awaitingConfirmation, .awaitingAppChoice: PilotTheme.accent
     case .complete: PilotTheme.signal
     case .error, .blocked: PilotTheme.danger
     case .stopped, .rejected: PilotTheme.muted
@@ -61,6 +61,12 @@ struct ListeningControls: View {
       }.buttonStyle(PilotButtonStyle(prominent: true, destructive: isCancelling))
         .frame(maxWidth: compact ? .infinity : 205)
         .help(primaryHelp)
+      if isListening {
+        Button { session.stop() } label: {
+          Image(systemName: "xmark").accessibilityLabel("Stop listening and clear queue")
+        }.buttonStyle(PilotButtonStyle(destructive: true))
+          .help("Stop listening and cancel pending work (⌘.)")
+      }
       if !compact { Spacer(minLength: 0) }
     }
   }
@@ -68,17 +74,17 @@ struct ListeningControls: View {
   private var isListening: Bool { session.state == .listening }
   private var isCancelling: Bool { session.state.isActive && !isListening }
   private var primaryLabel: String {
-    if isListening { return "Finish recording" }
+    if isListening { return "Commit command" }
     if session.state == .awaitingConfirmation { return "Stop run" }
     if case .running = session.state { return "Stop run" }
     return session.state.isActive ? "Cancel" : "Start listening"
   }
   private var primaryIcon: String {
-    if isListening { return "stop.fill" }
+    if isListening { return "checkmark" }
     return session.state.isActive ? "xmark" : "mic"
   }
   private var primaryHelp: String {
-    if isListening { return "Finish recording and transcribe" }
+    if isListening { return "Commit this utterance and keep listening" }
     return session.state.isActive ? "Cancel the current session (⌘.)" : "Start listening (⇧⌘L)"
   }
   private func primaryAction() {

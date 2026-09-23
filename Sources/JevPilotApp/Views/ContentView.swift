@@ -86,6 +86,22 @@ struct ControlView: View {
               Text(message).font(.callout).foregroundStyle(PilotTheme.danger).textSelection(.enabled)
             }
             ListeningControls()
+            if session.activeGoal != nil || !session.queuedGoals.isEmpty || session.queuePaused {
+              HStack(spacing: 10) {
+                Text(controller.status.label).font(PilotTheme.mono(11))
+                Text("\(session.queuedGoals.count) queued").font(PilotTheme.mono(11)).foregroundStyle(PilotTheme.muted)
+                Spacer()
+                if session.queuePaused {
+                  Button("Resume") { session.resumeQueue() }.buttonStyle(PilotButtonStyle())
+                }
+              }
+              if let reason = session.pauseReason {
+                Text(reason).font(.caption).foregroundStyle(PilotTheme.muted)
+              }
+              ForEach(session.queuedGoals) { goal in
+                Text(goal.text).font(.caption).lineLimit(2).foregroundStyle(PilotTheme.muted)
+              }
+            }
             if !session.transcript.isEmpty {
               PilotRule()
               Text(session.transcript).font(.system(size: 16, weight: .regular)).lineSpacing(4).textSelection(.enabled)
@@ -108,9 +124,28 @@ struct ControlView: View {
               SectionCaption(title: "Confirm action")
               Text(pending.decision.candidate.action.summary).font(PilotTheme.label(21)).textSelection(.enabled)
               Text(pending.assessment.reason).font(.system(size: 12)).foregroundStyle(PilotTheme.muted)
-              HStack(spacing: 10) {
-                Button("Approve") { session.confirmPendingAction() }.buttonStyle(PilotButtonStyle(prominent: true))
-                Button("Reject") { session.rejectPendingAction() }.buttonStyle(PilotButtonStyle())
+              if case .terminalRun(let command) = pending.decision.candidate.action {
+                TerminalApprovalView(command: command)
+              } else {
+                HStack(spacing: 10) {
+                  Button("Approve") { session.confirmPendingAction() }.buttonStyle(PilotButtonStyle(prominent: true))
+                  Button("Reject") { session.rejectPendingAction() }.buttonStyle(PilotButtonStyle())
+                }
+              }
+            }
+          }
+        }
+        if !controller.appChoices.isEmpty {
+          Surface {
+            VStack(alignment: .leading, spacing: 10) {
+              SectionCaption(title: "Choose app")
+              ForEach(controller.appChoices) { choice in
+                switch choice.action {
+                case .openApp(let bundleID, let name), .focusApp(let bundleID, let name):
+                  Button("\(name) · \(bundleID)") { session.chooseApplication(bundleID) }
+                    .buttonStyle(PilotButtonStyle())
+                default: EmptyView()
+                }
               }
             }
           }
@@ -194,10 +229,33 @@ struct ControlView: View {
     case .askingJev: "Asking Jev."
     case .running: "Working."
     case .awaitingConfirmation: "Your call."
+    case .awaitingAppChoice: "Choose an app."
     case .complete: "Complete."
     case .rejected: "Rejected."
     case .blocked: "Blocked."
     case .error: "Let’s reconnect."
+    }
+  }
+}
+
+/// Editing a shell command sends it back through Jev instead of changing an approved action.
+private struct TerminalApprovalView: View {
+  @EnvironmentObject private var session: SessionCoordinator
+  let command: String
+  @State private var draft: String
+  init(command: String) { self.command = command; _draft = State(initialValue: command) }
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      TextField("Terminal command", text: $draft).textFieldStyle(.plain)
+        .padding(10).background(PilotTheme.inset, in: RoundedRectangle(cornerRadius: 6))
+      HStack(spacing: 10) {
+        Button(draft == command ? "Approve run" : "Recheck with Jev") {
+          if draft == command { session.confirmPendingAction() }
+          else { session.revisePendingTerminalCommand(draft) }
+        }.buttonStyle(PilotButtonStyle(prominent: true))
+          .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        Button("Reject") { session.rejectPendingAction() }.buttonStyle(PilotButtonStyle())
+      }
     }
   }
 }
