@@ -210,8 +210,13 @@ public final class AutomationController: ObservableObject {
       guard let old = selectedState.windows.first(where: { $0.id == id }),
         let current = fresh.windows.first(where: { $0.id == id }), old == current
       else { return nil }
-    case .pressKey, .scrollUp, .scrollDown, .searchInApp, .terminalType, .terminalRun,
-      .nextTab, .previousTab, .navigateBack, .navigateForward:
+    case .terminalType, .terminalRun:
+      guard let id = selectedState.focusedElementID, fresh.focusedElementID == id,
+        let old = selectedState.elements.first(where: { $0.id == id }),
+        let current = fresh.elements.first(where: { $0.id == id }), old == current,
+        current.isFocused && current.isTextInput else { return nil }
+    case .pressKey, .scrollUp, .scrollDown, .searchInApp,
+      .notesCreateNote, .nextTab, .previousTab, .navigateBack, .navigateForward:
       guard fresh.focusedElementID == selectedState.focusedElementID else { return nil }
     case .openApp, .focusApp, .finderOpenFolder, .stop:
       break

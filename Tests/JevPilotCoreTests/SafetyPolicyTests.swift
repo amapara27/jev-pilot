@@ -67,7 +67,8 @@ final class SafetyPolicyTests: XCTestCase {
   }
 
   func testTerminalExecutionAndFinderMoveAlwaysRequireApproval() {
-    let state = DesktopState()
+    let state = DesktopState(activeApplication: .init(name: "Terminal", bundleIdentifier: "com.apple.Terminal"),
+      elements: [.init(id: "input", role: "AXTextArea", isFocused: true)])
     XCTAssertEqual(policy.assess(action: .terminalType(command: "pwd"), confidence: 1, state: state).disposition, .allow)
     for action: AutomationAction in [
       .terminalRun(command: "pwd"),
@@ -76,6 +77,16 @@ final class SafetyPolicyTests: XCTestCase {
     ] {
       XCTAssertEqual(policy.assess(action: action, confidence: 1, state: state).disposition, .requireConfirmation)
     }
+  }
+
+  func testAppSpecificActionsRejectWrongAppOrSearchAndKeepRiskThresholds() {
+    XCTAssertEqual(policy.assess(action: .notesCreateNote, confidence: 1, state: .init()).disposition, .deny)
+    let notes = DesktopState(activeApplication: .init(name: "Notes", bundleIdentifier: "com.apple.Notes"))
+    XCTAssertEqual(policy.assess(action: .notesCreateNote, confidence: 0.9, state: notes).disposition, .allow)
+    XCTAssertEqual(policy.assess(action: .notesCreateNote, confidence: 0.7, state: notes).disposition, .requireConfirmation)
+    let search = DesktopState(activeApplication: .init(name: "Terminal", bundleIdentifier: "com.apple.Terminal"),
+      elements: [.init(id: "search", role: "AXTextField", label: "Search", isFocused: true)])
+    XCTAssertEqual(policy.assess(action: .terminalType(command: "pwd"), confidence: 1, state: search).disposition, .deny)
   }
 
   func testMultilineTerminalTextCannotBypassRunApproval() {

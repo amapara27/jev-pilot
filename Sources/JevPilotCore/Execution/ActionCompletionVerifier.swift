@@ -84,13 +84,26 @@ public final class DesktopActionCompletionVerifier: ActionCompletionVerifying {
       || after.windows != before.windows || after.elements != before.elements
     switch action {
     case .focusElement(let id, _):
-      return after.focusedElementID == id ? .init(succeeded: true, message: "Target is focused.") : nil
+      return sameApplication(before, after) && before.focusedWindowID == after.focusedWindowID && after.focusedElementID == id
+        ? .init(succeeded: true, message: "Target is focused.") : nil
     case .typeText(let id, let text):
-      let oldValue = before.elements.first(where: { $0.id == id })?.value ?? ""
-      guard let newValue = after.elements.first(where: { $0.id == id })?.value,
-        newValue != oldValue, newValue.contains(text)
+      guard sameApplication(before, after), before.focusedWindowID == after.focusedWindowID,
+        let old = before.elements.first(where: { $0.id == id }),
+        let new = after.elements.first(where: { $0.id == id }),
+        after.focusedElementID == id, new.isFocused,
+        TextInput.insertionMatches(before: old, after: new, text: text)
       else { return nil }
-      return .init(succeeded: true, message: "Text appeared in the target field.")
+      return .init(succeeded: true, message: "Exact text insertion verified in the target field.")
+    case .notesCreateNote:
+      guard sameApplication(before, after), after.activeApplication?.bundleIdentifier == "com.apple.Notes",
+        let editor = after.elements.first(where: { $0.isFocused && $0.role == "AXTextArea" && $0.isTextInput && !$0.isSearchInput }),
+        editor.value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true else { return nil }
+      let beforeRows = before.elements.filter { $0.role == "AXRow" }
+      let afterRows = after.elements.filter { $0.role == "AXRow" }
+      let editorAppeared = !before.elements.contains { $0.role == "AXTextArea" && !$0.isSearchInput }
+      let selectionChanged = beforeRows.filter(\.isSelected) != afterRows.filter(\.isSelected)
+      guard editorAppeared || afterRows.count > beforeRows.count || selectionChanged else { return nil }
+      return .init(succeeded: true, message: "New note selection and empty editor verified.")
     case .closeWindow(let id, _):
       return !after.windows.contains(where: { $0.id == id })
         ? .init(succeeded: true, message: "Window closed.") : nil
@@ -110,8 +123,10 @@ public final class DesktopActionCompletionVerifier: ActionCompletionVerifying {
       return after.activeApplication?.bundleIdentifier == "com.apple.finder"
         && after.windows.contains(where: { $0.isFocused && ($0.url == path || $0.title == URL(fileURLWithPath: path).lastPathComponent) })
         ? .init(succeeded: true, message: "Finder location verified.") : nil
-    case .finderSelectItem(let id, _):
-      return after.elements.first(where: { $0.id == id })?.isSelected == true
+    case .finderSelectItem(_, let path):
+      let selectedPaths = Set(after.elements.filter(\.isSelected).compactMap(\.url))
+      return sameApplication(before, after) && after.activeApplication?.bundleIdentifier == "com.apple.finder"
+        && selectedPaths == [path]
         ? .init(succeeded: true, message: "Finder selection verified.") : nil
     case .finderOpenItem(_, let path):
       let itemName = URL(fileURLWithPath: path).lastPathComponent
@@ -125,11 +140,18 @@ public final class DesktopActionCompletionVerifier: ActionCompletionVerifying {
       .nextTab, .previousTab, .navigateBack, .navigateForward:
       return changed ? .init(succeeded: true, message: "Desktop change observed.") : nil
     case .searchInApp(let query):
-      return after.elements.contains(where: { $0.isFocused && ($0.value?.contains(query) == true) })
+      return sameApplication(before, after) && after.elements.contains(where: { $0.isFocused && $0.isSearchInput && $0.value == query })
         ? .init(succeeded: true, message: "Search query appeared.") : nil
-    case .terminalType(let command), .terminalRun(let command):
-      return after.elements.contains(where: { $0.isFocused && $0.value?.contains(command) == true })
-        ? .init(succeeded: true, message: "Terminal accepted the command text; exit status is unknown.") : nil
+    case .terminalType(let command):
+      guard sameApplication(before, after), after.activeApplication?.bundleIdentifier == "com.apple.Terminal",
+        let old = before.elements.first(where: { $0.isFocused && $0.role == "AXTextArea" && $0.isTextInput }),
+        let new = after.elements.first(where: { $0.id == old.id && $0.isFocused }),
+        TextInput.insertionMatches(before: old, after: new, text: command) else { return nil }
+      return .init(succeeded: true, message: "Exact Terminal command entry verified; Return was not sent.")
+    case .terminalRun:
+      // The executor verifies exact entry before Return and observes submission separately.
+      return sameApplication(before, after) && after.activeApplication?.bundleIdentifier == "com.apple.Terminal" && changed
+        ? .init(succeeded: true, message: "Terminal submission observed; exit status is unknown.") : nil
     case .finderRenameItem, .finderCopyItem, .finderMoveItem:
       return nil
     case .stop:
@@ -137,6 +159,11 @@ public final class DesktopActionCompletionVerifier: ActionCompletionVerifying {
     default:
       return changed ? .init(succeeded: true, message: "Desktop changed as expected.") : nil
     }
+  }
+
+  private func sameApplication(_ before: DesktopState, _ after: DesktopState) -> Bool {
+    before.activeApplication?.processIdentifier == after.activeApplication?.processIdentifier
+      && before.activeApplication?.bundleIdentifier == after.activeApplication?.bundleIdentifier
   }
 }
 

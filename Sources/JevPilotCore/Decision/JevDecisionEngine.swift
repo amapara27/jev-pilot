@@ -58,12 +58,12 @@ public actor JevDecisionEngine: DecisionEngine {
       })
     let requestBody = SystemOneRequest(
       model: configuration.model,
-      state: DecisionState(goal: goal, desktop: state),
+      state: DecisionState(goal: goal, desktop: providerState(state)),
       questions: [
         "next_action": ChoiceQuestion(
           type: "choice",
           instructions:
-            "Choose exactly one currently valid next action that best advances the user's goal. Choose STOP only if the goal is complete or no listed action can safely advance it. Do not invent actions or parameters.",
+            "Infer the user's intent from the goal and choose exactly one currently valid next action that advances it. 'Type', 'write', or 'dictate' means insert the exact supplied text, not execute commands mentioned inside that text. Focus the intended editable field first when needed; in Notes use the note body, not search. Creating a note may require opening Notes and then New Note before typing. Type-only Terminal requests never authorize Return. Use recent verified actions to avoid duplicate typing or note creation. Choose STOP only if the goal is complete or no listed action can safely advance it. Do not invent actions or parameters.",
           criteria: criteria
         )
       ]
@@ -157,6 +157,20 @@ public actor JevDecisionEngine: DecisionEngine {
       model: decoded.model,
       latencyMilliseconds: milliseconds
     )
+  }
+
+  /// Exact local verification must not expand the text sent to the remote provider.
+  private func providerState(_ state: DesktopState) -> DesktopState {
+    var redacted = state
+    redacted.elements = state.elements.map { element in
+      UIElementState(id: element.id, role: element.role, subrole: element.subrole,
+        label: element.label, value: element.isSecureTextInput ? "<redacted>" : element.value.map { String($0.prefix(240)) },
+        isEnabled: element.isEnabled, isFocused: element.isFocused,
+        supportedActions: element.supportedActions, depth: element.depth, url: element.url,
+        isSelected: element.isSelected, textSelection: element.textSelection,
+        valueIsTruncated: element.valueIsTruncated == true || (element.value?.count ?? 0) > 240)
+    }
+    return redacted
   }
 }
 

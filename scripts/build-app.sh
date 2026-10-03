@@ -9,7 +9,11 @@ app_dir="$project_root/.build/Jev Pilot.app"
 contents_dir="$app_dir/Contents"
 
 cd "$project_root"
-swift build -c "$configuration" --product JevPilot
+build_options=()
+if [[ "${JEV_DISABLE_SWIFTPM_SANDBOX:-0}" == "1" ]]; then
+  build_options+=(--disable-sandbox)
+fi
+swift build -c "$configuration" --product JevPilot "${build_options[@]}"
 
 mkdir -p "$contents_dir/MacOS" "$contents_dir/Resources"
 cp "$project_root/.build/$configuration/JevPilot" "$contents_dir/MacOS/JevPilot"

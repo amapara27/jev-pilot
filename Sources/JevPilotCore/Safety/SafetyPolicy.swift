@@ -17,6 +17,15 @@ public struct SafetyPolicy: Sendable {
   public func assess(action: AutomationAction, confidence: Double, state: DesktopState)
     -> SafetyAssessment
   {
+    if case .notesCreateNote = action, state.activeApplication?.bundleIdentifier != "com.apple.Notes" {
+      return SafetyAssessment(risk: .blocked, disposition: .deny, reason: "New Note is available only in Notes.")
+    }
+    if case .terminalType = action, !hasTerminalInput(state) {
+      return SafetyAssessment(risk: .blocked, disposition: .deny, reason: "Terminal's command input must be focused.")
+    }
+    if case .terminalRun = action, !hasTerminalInput(state) {
+      return SafetyAssessment(risk: .blocked, disposition: .deny, reason: "Terminal's command input must be focused.")
+    }
     if case .terminalType(let command) = action, containsCommandControlCharacter(command) {
       return SafetyAssessment(risk: .blocked, disposition: .deny, reason: "Terminal commands must be one line without control characters.")
     }
@@ -103,10 +112,15 @@ public struct SafetyPolicy: Sendable {
       .high
     case .finderOpenItem(_, let url) where isExecutableFile(url):
       .high
-    case .finderOpenItem, .clickElement, .typeText, .activateMenu, .searchInApp,
+    case .finderOpenItem, .clickElement, .typeText, .notesCreateNote, .activateMenu, .searchInApp,
       .finderCopyItem, .terminalType:
       .medium
     }
+  }
+
+  private func hasTerminalInput(_ state: DesktopState) -> Bool {
+    state.activeApplication?.bundleIdentifier == "com.apple.Terminal"
+      && state.elements.contains { $0.isFocused && $0.isTextInput && $0.role == "AXTextArea" }
   }
 
   private func targetsSecureField(_ action: AutomationAction, state: DesktopState) -> Bool {

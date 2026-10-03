@@ -77,12 +77,83 @@ final class ValidActionGeneratorTests: XCTestCase {
       isAccessibilityTrusted: true)
     let off = ValidActionGenerator(supportedApplications: [])
     XCTAssertTrue(off.candidates(for: "type hello world", state: state).contains {
-      $0.action == .typeText(elementID: "field", text: "hello world")
+      $0.action == .terminalType(command: "hello world")
     })
     XCTAssertTrue(off.candidates(for: "run git status", state: state).contains { $0.action == .terminalType(command: "git status") })
     XCTAssertFalse(off.candidates(for: "run git status", state: state).contains { $0.action == .terminalRun(command: "git status") })
     let on = ValidActionGenerator(supportedApplications: [], terminalExecutionEnabled: { true })
     XCTAssertTrue(on.candidates(for: "run git status", state: state).contains { $0.action == .terminalRun(command: "git status") })
+    XCTAssertFalse(on.candidates(for: "type git status", state: state).contains { $0.action == .terminalRun(command: "git status") })
+    XCTAssertFalse(on.candidates(for: "type command git status", state: state).contains { if case .terminalRun = $0.action { true } else { false } })
+    XCTAssertFalse(on.candidates(for: "type git status", state: state).contains { $0.action == .pressKey(.returnKey) })
+  }
+
+  func testTypingTargetsArePrioritizedAndPayloadIsNotTreatedAsCommands() {
+    let generator = ValidActionGenerator(supportedApplications: [.init(name: "Notes", bundleIdentifiers: ["com.apple.Notes"])],
+      applicationURL: { _ in URL(fileURLWithPath: "/Applications/Notes.app") })
+    var state = DesktopState(elements: (0..<100).map {
+      .init(id: "button-\($0)", role: "AXButton", label: "Button \($0)", supportedActions: ["AXPress"])
+    } + [.init(id: "editor", role: "AXTextArea", label: "Body", value: "")])
+    let goal = "please type create a new note and open Notes"
+    let unfocused = generator.candidates(for: goal, state: state)
+    XCTAssertTrue(unfocused.contains { $0.action == .focusElement(elementID: "editor", label: "Body") })
+    XCTAssertFalse(unfocused.contains { if case .openApp = $0.action { true } else { false } })
+    XCTAssertFalse(unfocused.contains { if case .typeText = $0.action { true } else { false } })
+    state.elements = [.init(id: "editor", role: "AXTextArea", label: "Body", value: "", isFocused: true)]
+    let focused = generator.candidates(for: goal, state: state)
+    XCTAssertTrue(focused.contains { $0.action == .typeText(elementID: "editor", text: "create a new note and open Notes") })
+    XCTAssertFalse(focused.contains { $0.action == .pressKey(.returnKey) })
+    for field in [
+      UIElementState(id: "editor", role: "AXTextArea", isEnabled: false, isFocused: true),
+      UIElementState(id: "editor", role: "AXTextField", subrole: "AXSecureTextField", isFocused: true),
+      UIElementState(id: "editor", role: "AXTextArea", isFocused: true, valueIsTruncated: true),
+    ] {
+      state.elements = [field]
+      XCTAssertFalse(generator.candidates(for: "type hello", state: state).contains { if case .typeText = $0.action { true } else { false } })
+    }
+  }
+
+  func testNotesCreationPrecedesWritingAndVerifiedActionsAreNotRepeated() {
+    let generator = ValidActionGenerator(supportedApplications: [.init(name: "Notes", bundleIdentifiers: ["com.apple.Notes"])],
+      applicationURL: { _ in URL(fileURLWithPath: "/Applications/Notes.app") })
+    let goal = "create a new note and write note: bread and butter, then milk"
+    XCTAssertTrue(generator.candidates(for: goal, state: .init()).contains {
+      $0.action == .openApp(bundleIdentifier: "com.apple.Notes", name: "Notes")
+    })
+    var state = DesktopState(activeApplication: .init(name: "Notes", bundleIdentifier: "com.apple.Notes"),
+      elements: [.init(id: "editor", role: "AXTextArea", label: "Body", value: "", isFocused: true)])
+    let before = generator.candidates(for: goal, state: state)
+    XCTAssertTrue(before.contains { $0.action == .notesCreateNote })
+    XCTAssertFalse(before.contains { if case .typeText = $0.action { true } else { false } })
+    state.recentActions = [.init(action: .notesCreateNote, succeeded: true, message: "verified")]
+    let insertion = AutomationAction.typeText(elementID: "editor", text: "note: bread and butter, then milk")
+    let created = generator.candidates(for: goal, state: state)
+    XCTAssertFalse(created.contains { $0.action == .notesCreateNote })
+    XCTAssertTrue(created.contains { $0.action == insertion })
+    state.recentActions.append(.init(action: insertion, succeeded: true, message: "verified"))
+    XCTAssertFalse(generator.candidates(for: goal, state: state).contains { $0.action == insertion })
+  }
+
+  func testNotesAndTerminalSearchAreNotTypingTargets() {
+    let generator = ValidActionGenerator(supportedApplications: [], terminalExecutionEnabled: { true })
+    for (name, id) in [("Notes", "com.apple.Notes"), ("Terminal", "com.apple.Terminal")] {
+      let state = DesktopState(activeApplication: .init(name: name, bundleIdentifier: id),
+        elements: [.init(id: "search", role: "AXTextField", subrole: "AXSearchField", label: "Search", isFocused: true),
+          .init(id: "editor", role: "AXTextArea", label: "Body")])
+      let candidates = generator.candidates(for: "type hello", state: state)
+      XCTAssertFalse(candidates.contains { if case .typeText = $0.action { true } else { false } })
+      XCTAssertFalse(candidates.contains { if case .terminalType = $0.action { true } else { false } })
+      XCTAssertTrue(candidates.contains { $0.action == .focusElement(elementID: "editor", label: "Body") })
+    }
+  }
+
+  func testFinderSearchAndRepeatedAXRepresentationsOfOneItem() {
+    let generator = ValidActionGenerator(supportedApplications: [])
+    let finder = DesktopState(activeApplication: .init(name: "Finder", bundleIdentifier: "com.apple.finder"),
+      elements: [.init(id: "row", role: "AXRow", label: "resume.pdf", url: "/tmp/resume.pdf"),
+        .init(id: "icon", role: "AXImage", label: "resume.pdf", url: "/tmp/resume.pdf")])
+    XCTAssertTrue(generator.candidates(for: "locate resumes", state: finder).contains { $0.action == .searchInApp(query: "resumes") })
+    XCTAssertTrue(generator.candidates(for: "open resume.pdf", state: finder).contains { $0.action == .finderOpenItem(elementID: "row", url: "/tmp/resume.pdf") })
   }
 
   func testCommonSpokenAppAliasCanLaunchNonRunningApp() {

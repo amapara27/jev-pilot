@@ -7,6 +7,7 @@ import Foundation
 @MainActor
 public final class MacOSActionExecutor: ActionExecuting {
   private unowned let perception: AccessibilityPerception
+  private var terminalEntry: (command: String, input: AXUIElement, value: String)?
 
   public init(perception: AccessibilityPerception) {
     self.perception = perception
@@ -72,26 +73,52 @@ public final class MacOSActionExecutor: ActionExecuting {
       }
       let result = AXUIElementSetAttributeValue(
         element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+      // Some editors expose focus through AXPress rather than a writable AXFocused.
+      if result != .success {
+        var actions: CFArray?
+        if AXUIElementCopyActionNames(element, &actions) == .success,
+          (actions as? [String])?.contains(kAXPressAction as String) == true,
+          perception.textState(for: element).isTextInput {
+          return perform(kAXPressAction, on: element, success: "Focused \(label ?? "element").")
+        }
+      }
       return axResult(result, success: "Focused \(label ?? "element").")
 
     case .typeText(let elementID, let text):
       guard let element = perception.element(for: elementID) else { return staleElementResult }
-      guard boolAttribute(element, kAXFocusedAttribute) == true else {
+      guard let focused = focusedTextInput(), CFEqual(element, focused) else {
         return .init(
           succeeded: false,
           message: "The intended text field is no longer focused. A fresh snapshot is required."
         )
       }
-      return typeUnicode(text)
+      return insertText(text, into: element)
+
+    case .notesCreateNote:
+      guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.Notes" else {
+        return .init(succeeded: false, message: "Notes is no longer active.")
+      }
+      // The documented app shortcut avoids brittle toolbar positions and menu labels.
+      return postChord(keyCode: 45, modifiers: .maskCommand)
+        ? .init(succeeded: true, message: "New note requested; waiting for its editor.")
+        : .init(succeeded: false, message: "Could not request a new note.")
 
     case .activateMenu(let id, _), .selectTab(let id, _):
       guard let element = perception.element(for: id) else { return staleElementResult }
       return perform(kAXPressAction, on: element, success: "Control activated.")
 
     case .searchInApp(let query):
-      guard postChord(keyCode: 3, modifiers: .maskCommand) else { return .init(succeeded: false, message: "Could not open search.") }
-      guard await waitForFocusedTextField() else { return .init(succeeded: false, message: "The app did not open a search field.") }
-      return typeUnicode(query)
+      let modifiers: CGEventFlags = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.Notes"
+        ? [.maskCommand, .maskAlternate] : .maskCommand
+      guard postChord(keyCode: 3, modifiers: modifiers) else { return .init(succeeded: false, message: "Could not open search.") }
+      guard let input = await waitForSearchInput() else { return .init(succeeded: false, message: "The app did not expose a focused search field; no text was entered.") }
+      // Select only the identified search input's value, never the document's contents.
+      var selection = CFRange(location: 0, length: (perception.textState(for: input).value ?? "").utf16.count)
+      guard let value = AXValueCreate(.cfRange, &selection),
+        AXUIElementSetAttributeValue(input, kAXSelectedTextRangeAttribute as CFString, value) == .success else {
+        return .init(succeeded: false, message: "Could not select the existing search query; no text was entered.")
+      }
+      return insertText(query, into: input)
 
     case .nextTab:
       return postChord(keyCode: 30, modifiers: [.maskCommand, .maskShift])
@@ -119,7 +146,9 @@ public final class MacOSActionExecutor: ActionExecuting {
 
     case .finderOpenItem(let id, _):
       guard let element = perception.element(for: id) else { return staleElementResult }
-      _ = AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue)
+      guard AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue) == .success else {
+        return .init(succeeded: false, message: "Finder could not select the requested item; Open was not sent.")
+      }
       guard postChord(keyCode: 31, modifiers: .maskCommand) else { return .init(succeeded: false, message: "Could not open the Finder item.") }
       return .init(succeeded: true, message: "Finder open requested.")
 
@@ -166,13 +195,34 @@ public final class MacOSActionExecutor: ActionExecuting {
       guard !command.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
         return .init(succeeded: false, message: "Terminal commands must be one line without control characters.")
       }
-      let typed = typeUnicode(command)
-      guard typed.succeeded else { return typed }
+      guard let input = focusedTextInput(), perception.textState(for: input).role == "AXTextArea" else {
+        return .init(succeeded: false, message: "Terminal's command input is not focused; no command was entered.")
+      }
+      let before = perception.textState(for: input)
+      let alreadyEntered = perception.recentlyEnteredTerminalCommand == command
+      if alreadyEntered {
+        guard terminalEntry?.command == command, terminalEntry?.value == before.value,
+          terminalEntry.map({ CFEqual($0.input, input) }) == true else {
+          return .init(succeeded: false, message: "The previously entered command changed. No text was repeated and Return was not sent.")
+        }
+      }
+      var entered = before.value
+      if !alreadyEntered {
+        let typed = insertText(command, into: input)
+        guard typed.succeeded else { return typed }
+        guard let observed = await waitForInsertion(command, into: input, before: before) else {
+          return .init(succeeded: false, message: "Could not verify exact command entry; Return was not sent. Do not retry without checking Terminal.")
+        }
+        entered = observed
+        terminalEntry = (command, input, observed)
+      }
       if case .terminalRun = action {
-        guard let entered = await waitForTerminalText(command) else {
+        guard let entered, let currentInput = focusedTextInput(), CFEqual(input, currentInput),
+          perception.textState(for: input).value == entered else {
           return .init(succeeded: false, message: "Could not verify command entry, so Return was not sent.")
         }
         guard postChord(keyCode: 36) else { return .init(succeeded: false, message: "Could not submit the Terminal command.") }
+        terminalEntry = nil
         guard await waitForTerminalChange(after: entered) else {
           return .init(succeeded: false, message: "Return was sent, but Terminal submission could not be verified; exit status is unknown.")
         }
@@ -256,24 +306,43 @@ public final class MacOSActionExecutor: ActionExecuting {
     return unsafeDowncast(value, to: AXUIElement.self)
   }
 
-  private func boolAttribute(_ element: AXUIElement, _ name: String) -> Bool? {
-    var value: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else {
-      return nil
+  /// AXSelectedText preserves rich text outside the selection; never rewrite AXValue wholesale.
+  private func insertText(_ text: String, into element: AXUIElement) -> ExecutionResult {
+    guard let focused = focusedTextInput(), CFEqual(focused, element) else { return staleElementResult }
+    let before = perception.textState(for: element)
+    guard before.isTextInput, before.value != nil, before.valueIsTruncated != true,
+      text.count + (before.value?.count ?? 0) <= TextInput.maximumValueLength else {
+      return .init(succeeded: false, message: "The input does not expose enough text to verify insertion; nothing was typed.")
     }
-    return (value as? NSNumber)?.boolValue
+    var settable: DarwinBoolean = false
+    if before.textSelection != nil,
+      TextInput.expectedValue(before: before, inserting: text) != nil,
+      AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success,
+      settable.boolValue {
+      return axResult(AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString),
+        success: "Inserted \(text.count) characters without submission.")
+    }
+    return typeUnicode(text, into: element)
   }
 
-  private func typeUnicode(_ text: String) -> ExecutionResult {
-    let units = Array(text.utf16)
-    guard !units.isEmpty else { return .init(succeeded: true, message: "Nothing to type.") }
-    for chunkStart in stride(from: 0, to: units.count, by: 20) {
-      let chunk = Array(units[chunkStart..<min(chunkStart + 20, units.count)])
-      guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
+  private func typeUnicode(_ text: String, into target: AXUIElement? = nil) -> ExecutionResult {
+    guard let element = target ?? focusedTextInput() else {
+      return .init(succeeded: false, message: "No accessible text input is focused.")
+    }
+    for chunk in TextInput.unicodeChunks(text) {
+      guard !Task.isCancelled, let focused = focusedTextInput(), CFEqual(focused, element) else {
+        return .init(succeeded: false, message: "Text entry stopped because focus changed. Check for partially entered text before retrying.")
+      }
+      guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
+        let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
         return .init(succeeded: false, message: "Could not create text input event.")
       }
-      event.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: chunk)
-      event.post(tap: .cghidEventTap)
+      down.flags = []
+      up.flags = []
+      down.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: chunk)
+      up.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: chunk)
+      down.post(tap: .cghidEventTap)
+      up.post(tap: .cghidEventTap)
     }
     return .init(succeeded: true, message: "Typed \(text.count) characters.")
   }
@@ -320,38 +389,57 @@ public final class MacOSActionExecutor: ActionExecuting {
   }
 
   private func waitForFocusedTextField() async -> Bool {
-    guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return false }
-    let app = AXUIElementCreateApplication(pid)
     for _ in 0..<40 {
-      if let focused = elementAttribute(app, kAXFocusedUIElementAttribute) {
-        var value: CFTypeRef?
-        if AXUIElementCopyAttributeValue(focused, kAXRoleAttribute as CFString, &value) == .success,
-          let role = value as? String,
-          role == (kAXTextFieldRole as String) || role == (kAXTextAreaRole as String) { return true }
-      }
+      if Task.isCancelled { return false }
+      if focusedTextInput() != nil { return true }
       do { try await Task.sleep(for: .milliseconds(25)) }
       catch { return false }
     }
     return false
   }
 
-  /// Checks typed text before Return and a distinct Terminal update after Return.
-  private func focusedTerminalText() -> String? {
-    guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return nil }
-    let app = AXUIElementCreateApplication(pid)
-    guard let focused = elementAttribute(app, kAXFocusedUIElementAttribute) else { return nil }
-    var value: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(focused, kAXValueAttribute as CFString, &value) == .success else { return nil }
-    return value as? String
+  /// Every text effect checks the live app and native focused element, not only an AXFocused flag.
+  private func focusedTextInput() -> AXUIElement? {
+    guard !Task.isCancelled, let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+      pid == perception.observedProcessIdentifier,
+      let focused = elementAttribute(AXUIElementCreateApplication(pid), kAXFocusedUIElementAttribute) else { return nil }
+    // Per-batch focus guards should not repeatedly copy the entire document value.
+    var role: CFTypeRef?, subrole: CFTypeRef?, enabled: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(focused, kAXRoleAttribute as CFString, &role) == .success,
+      let role = role as? String, ["AXTextField", "AXTextArea", "AXComboBox"].contains(role) else { return nil }
+    _ = AXUIElementCopyAttributeValue(focused, kAXSubroleAttribute as CFString, &subrole)
+    _ = AXUIElementCopyAttributeValue(focused, kAXEnabledAttribute as CFString, &enabled)
+    let subtype = (subrole as? String)?.lowercased() ?? ""
+    guard !subtype.contains("secure"), !subtype.contains("password"), (enabled as? NSNumber)?.boolValue != false else { return nil }
+    return focused
   }
 
-  private func waitForTerminalText(_ command: String) async -> String? {
+  private func waitForSearchInput() async -> AXUIElement? {
     for _ in 0..<40 {
-      if let value = focusedTerminalText(), value.contains(command) { return value }
+      if Task.isCancelled { return nil }
+      if let input = focusedTextInput(), perception.textState(for: input).isSearchInput { return input }
       do { try await Task.sleep(for: .milliseconds(25)) }
       catch { return nil }
     }
     return nil
+  }
+
+  private func waitForInsertion(_ text: String, into input: AXUIElement, before: UIElementState) async -> String? {
+    for _ in 0..<40 {
+      guard let focused = focusedTextInput(), CFEqual(input, focused) else { return nil }
+      let after = perception.textState(for: input)
+      if TextInput.insertionMatches(before: before, after: after, text: text) { return after.value }
+      do { try await Task.sleep(for: .milliseconds(25)) }
+      catch { return nil }
+    }
+    return nil
+  }
+
+  /// Checks typed text before Return and a distinct Terminal update after Return.
+  private func focusedTerminalText() -> String? {
+    guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.Terminal",
+      let focused = focusedTextInput(), perception.textState(for: focused).role == "AXTextArea" else { return nil }
+    return perception.textState(for: focused).value
   }
 
   private func waitForTerminalChange(after entered: String) async -> Bool {

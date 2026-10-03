@@ -8,6 +8,7 @@ import Foundation
 public final class AccessibilityPerception: DesktopPerceiving {
   private var elementRegistry: [String: AXUIElement] = [:]
   public private(set) var observedProcessIdentifier: Int32?
+  private var recentActions: [ActionRecord] = []
   private let maximumElements: Int
   private let maximumDepth: Int
 
@@ -32,6 +33,7 @@ public final class AccessibilityPerception: DesktopPerceiving {
       throw PerceptionError.noFrontmostApplication
     }
     observedProcessIdentifier = frontmost.processIdentifier
+    self.recentActions = recentActions
     elementRegistry.removeAll(keepingCapacity: true)
     let runningApplications = NSWorkspace.shared.runningApplications
       .filter { $0.activationPolicy == .regular && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
@@ -81,6 +83,11 @@ public final class AccessibilityPerception: DesktopPerceiving {
         limit: 40, output: &menus)
       elements.append(contentsOf: menus)
     }
+    // Deep editors can sit outside the traversal budget. Always retain the actual input target.
+    if let focusedElement, !elements.contains(where: \.isFocused) {
+      let id = idForRegisteredElement(focusedElement) ?? register(focusedElement, path: "focused")
+      elements.append(elementState(focusedElement, id: id, depth: 0, isFocused: true))
+    }
 
     return DesktopState(
       activeApplication: ApplicationState(
@@ -101,6 +108,21 @@ public final class AccessibilityPerception: DesktopPerceiving {
   /// Resolves a snapshot-local ID for the executor, if it is still current.
   public func element(for id: String) -> AXUIElement? {
     elementRegistry[id]
+  }
+
+  /// Reads an input's full local value without replacing the snapshot's AX registry.
+  func textState(for element: AXUIElement) -> UIElementState {
+    elementState(element, id: idForRegisteredElement(element) ?? "input", depth: 0, isFocused: true)
+  }
+
+  var recentlyEnteredTerminalCommand: String? {
+    guard let last = recentActions.last(where: {
+      guard $0.succeeded else { return false }
+      if case .terminalType = $0.action { return true }
+      return false
+    }),
+      case .terminalType(let command) = last.action else { return nil }
+    return command
   }
 
   private func walk(
@@ -140,20 +162,8 @@ public final class AccessibilityPerception: DesktopPerceiving {
 
     let itemURL = filePath(for: element)
     if interactiveRoles.contains(role) || !actions.isEmpty || itemURL != nil {
-      output.append(
-        UIElementState(
-          id: id,
-          role: role,
-          subrole: stringAttribute(element, kAXSubroleAttribute),
-          label: preferredLabel(for: element),
-          value: safeValue(for: element, role: role),
-          isEnabled: boolAttribute(element, kAXEnabledAttribute) ?? true,
-          isFocused: focusedElement.map { CFEqual($0, element) } ?? false,
-          supportedActions: actions,
-          depth: depth,
-          url: itemURL,
-          isSelected: boolAttribute(element, kAXSelectedAttribute) ?? false
-        ))
+      output.append(elementState(element, id: id, depth: depth,
+        isFocused: focusedElement.map { CFEqual($0, element) } ?? false))
     }
 
     guard let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] else { return }
@@ -186,13 +196,38 @@ public final class AccessibilityPerception: DesktopPerceiving {
       ?? stringAttribute(element, kAXIdentifierAttribute)
   }
 
-  private func safeValue(for element: AXUIElement, role: String) -> String? {
+  /// Retains bounded local text for exact verification; provider requests truncate it separately.
+  private func elementState(_ element: AXUIElement, id: String, depth: Int, isFocused: Bool) -> UIElementState {
+    let role = stringAttribute(element, kAXRoleAttribute) ?? "AXUnknown"
+    let (value, truncated) = safeValue(for: element, role: role)
+    return UIElementState(id: id, role: role,
+      subrole: stringAttribute(element, kAXSubroleAttribute), label: preferredLabel(for: element),
+      value: value, isEnabled: boolAttribute(element, kAXEnabledAttribute) ?? true,
+      isFocused: isFocused, supportedActions: actionNames(element), depth: depth,
+      url: filePath(for: element), isSelected: boolAttribute(element, kAXSelectedAttribute) ?? false,
+      textSelection: selectedTextRange(for: element), valueIsTruncated: truncated)
+  }
+
+  private func safeValue(for element: AXUIElement, role: String) -> (String?, Bool) {
     let subrole = stringAttribute(element, kAXSubroleAttribute)?.lowercased() ?? ""
-    if subrole.contains("secure") || subrole.contains("password") { return "<redacted>" }
-    guard let value = attribute(element, kAXValueAttribute) else { return nil }
-    if let string = value as? String { return String(string.prefix(240)) }
-    if let number = value as? NSNumber { return number.stringValue }
-    return role == (kAXTextFieldRole as String) ? "<unavailable>" : nil
+    if subrole.contains("secure") || subrole.contains("password") { return ("<redacted>", false) }
+    guard let value = attribute(element, kAXValueAttribute) else { return (nil, false) }
+    if let string = value as? String {
+      let limit = ["AXTextField", "AXTextArea", "AXComboBox"].contains(role) ? TextInput.maximumValueLength : 240
+      return (String(string.prefix(limit)), string.count > limit)
+    }
+    if let number = value as? NSNumber { return (number.stringValue, false) }
+    return (nil, false)
+  }
+
+  /// Accessibility represents the caret and selection as a UTF-16 CFRange.
+  private func selectedTextRange(for element: AXUIElement) -> TextSelection? {
+    guard let value = attribute(element, kAXSelectedTextRangeAttribute),
+      CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+    let axValue = unsafeDowncast(value, to: AXValue.self)
+    var range = CFRange()
+    guard AXValueGetValue(axValue, .cfRange, &range), range.location >= 0, range.length >= 0 else { return nil }
+    return TextSelection(location: range.location, length: range.length)
   }
 
   private func filePath(for element: AXUIElement) -> String? {

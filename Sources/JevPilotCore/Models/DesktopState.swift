@@ -83,6 +83,8 @@ public struct UIElementState: Codable, Equatable, Sendable, Identifiable {
   public let depth: Int
   public let url: String?
   public let isSelected: Bool
+  public let textSelection: TextSelection?
+  public let valueIsTruncated: Bool?
 
   public init(
     id: String,
@@ -95,7 +97,9 @@ public struct UIElementState: Codable, Equatable, Sendable, Identifiable {
     supportedActions: [String] = [],
     depth: Int = 0,
     url: String? = nil,
-    isSelected: Bool = false
+    isSelected: Bool = false,
+    textSelection: TextSelection? = nil,
+    valueIsTruncated: Bool? = nil
   ) {
     self.id = id
     self.role = role
@@ -108,6 +112,38 @@ public struct UIElementState: Codable, Equatable, Sendable, Identifiable {
     self.depth = depth
     self.url = url
     self.isSelected = isSelected
+    self.textSelection = textSelection
+    self.valueIsTruncated = valueIsTruncated
+  }
+}
+
+/// AX text offsets count UTF-16 code units, not Swift Characters.
+public struct TextSelection: Codable, Equatable, Sendable {
+  public let location: Int
+  public let length: Int
+  public init(location: Int, length: Int) {
+    self.location = location
+    self.length = length
+  }
+}
+
+extension UIElementState {
+  /// Shared eligibility for candidate generation, execution, and completion checks.
+  var isTextInput: Bool {
+    ["AXTextField", "AXTextArea", "AXComboBox"].contains(role)
+      && isEnabled && !isSecureTextInput
+  }
+
+  var isSecureTextInput: Bool {
+    [role, subrole, label].compactMap { $0 }.contains {
+      $0.localizedCaseInsensitiveContains("secure") || $0.localizedCaseInsensitiveContains("password")
+    }
+  }
+
+  var isSearchInput: Bool {
+    isTextInput && [subrole, label].compactMap { $0 }.contains {
+      $0.localizedCaseInsensitiveContains("search") || $0.localizedCaseInsensitiveContains("find")
+    }
   }
 }
 

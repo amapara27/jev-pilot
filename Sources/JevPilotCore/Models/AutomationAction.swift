@@ -13,6 +13,7 @@ public enum AutomationAction: Codable, Equatable, Hashable, Sendable {
   case clickElement(elementID: String, label: String?)
   case focusElement(elementID: String, label: String?)
   case typeText(elementID: String, text: String)
+  case notesCreateNote
   case activateMenu(elementID: String, label: String)
   case selectTab(elementID: String, label: String)
   case nextTab
@@ -46,6 +47,7 @@ public enum AutomationAction: Codable, Equatable, Hashable, Sendable {
     case .clickElement: .clickElement
     case .focusElement: .focusElement
     case .typeText: .typeText
+    case .notesCreateNote: .notesCreateNote
     case .activateMenu: .activateMenu
     case .selectTab: .selectTab
     case .nextTab: .nextTab
@@ -81,6 +83,7 @@ public enum AutomationAction: Codable, Equatable, Hashable, Sendable {
     case .clickElement(_, let label): "Click \(label ?? "element")"
     case .focusElement(_, let label): "Focus \(label ?? "element")"
     case .typeText(_, let text): "Type \(text.debugDescription)"
+    case .notesCreateNote: "Create a new note in Notes"
     case .activateMenu(_, let label): "Choose menu \(label)"
     case .selectTab(_, let label): "Select tab \(label)"
     case .nextTab: "Next tab"
@@ -116,6 +119,7 @@ public enum ActionKind: String, Codable, CaseIterable, Sendable {
   case clickElement = "CLICK_ELEMENT"
   case focusElement = "FOCUS_ELEMENT"
   case typeText = "TYPE_TEXT"
+  case notesCreateNote = "NOTES_CREATE_NOTE"
   case activateMenu = "ACTIVATE_MENU"
   case selectTab = "SELECT_TAB"
   case nextTab = "NEXT_TAB"

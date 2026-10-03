@@ -11,7 +11,9 @@ private final class FakePerception: DesktopPerceiving {
   func requestAccessibilityPermission(prompt: Bool) -> Bool { true }
   func snapshot(recentActions: [ActionRecord]) throws -> DesktopState {
     snapshotCalls += 1
-    return state
+    var captured = state
+    captured.recentActions = recentActions
+    return captured
   }
 }
 
@@ -20,8 +22,10 @@ private final class FakeExecutor: ActionExecuting {
   var actions: [AutomationAction] = []
   var succeeds = true
   var failureMessage = "Failed"
+  var onExecute: ((AutomationAction) -> Void)?
   func execute(_ action: AutomationAction) async -> ExecutionResult {
     actions.append(action)
+    if succeeds { onExecute?(action) }
     return .init(succeeded: succeeds, message: succeeds ? "Executed" : failureMessage)
   }
 }
@@ -36,7 +40,7 @@ private final class UnverifiedCompletion: ActionCompletionVerifying {
 
 /// Can deliberately ignore cancellation to reproduce a response arriving after Stop.
 private actor FakeEngine: DecisionEngine {
-  enum Selection: Sendable { case stop, escape, enter, click, focus, focusEditor, terminalRun, failing }
+  enum Selection: Sendable { case stop, escape, enter, click, focus, focusEditor, focusInput, type, newNote, terminalRun, failing }
   var calls = 0
   var goals: [String] = []
   var selection: Selection
@@ -66,6 +70,9 @@ private actor FakeEngine: DecisionEngine {
       case .click: if case .clickElement = candidate.action { return true }; return false
       case .focus: return candidate.action == .focusApp(bundleIdentifier: "test.terminal", name: "Terminal")
       case .focusEditor: return candidate.action == .focusApp(bundleIdentifier: "one.editor", name: "Editor")
+      case .focusInput: if case .focusElement = candidate.action { return true }; return false
+      case .type: if case .typeText = candidate.action { return true }; return false
+      case .newNote: return candidate.action == .notesCreateNote
       case .terminalRun: if case .terminalRun = candidate.action { return true }; return false
       case .failing: return false
       }
@@ -739,7 +746,9 @@ final class RuntimeTests: XCTestCase {
   func testEditedTerminalApprovalIsRequeuedForFreshJevChoice() async {
     let engine = FakeEngine(.terminalRun)
     let perception = FakePerception()
-    perception.state = DesktopState(activeApplication: .init(name: "Terminal", bundleIdentifier: "com.apple.Terminal", processIdentifier: 123), isAccessibilityTrusted: true)
+    perception.state = DesktopState(activeApplication: .init(name: "Terminal", bundleIdentifier: "com.apple.Terminal", processIdentifier: 123),
+      focusedElementID: "input", elements: [.init(id: "input", role: "AXTextArea", value: "$ ", isFocused: true)],
+      isAccessibilityTrusted: true)
     let runtime = AutomationController(perception: perception,
       actionGenerator: .init(supportedApplications: [], terminalExecutionEnabled: { true }),
       decisionEngine: engine, executor: FakeExecutor())
@@ -766,6 +775,126 @@ final class RuntimeTests: XCTestCase {
     verifier.prepare(action: .focusElement(elementID: "field", label: nil), before: before)
     let missing = await verifier.verify(action: .focusElement(elementID: "field", label: nil), before: before, perception: perception)
     XCTAssertFalse(missing.succeeded)
+  }
+
+  func testJevFocusThenExactTypingUsesFreshStateAndDoesNotSubmit() async {
+    let perception = FakePerception()
+    perception.state.elements = [.init(id: "body", role: "AXTextArea", label: "Body", value: "Hello ",
+      textSelection: .init(location: 6, length: 0))]
+    let executor = FakeExecutor()
+    executor.onExecute = { action in
+      if case .focusElement = action {
+        perception.state.focusedElementID = "body"
+        perception.state.elements = [.init(id: "body", role: "AXTextArea", label: "Body", value: "Hello ",
+          isFocused: true, textSelection: .init(location: 6, length: 0))]
+      }
+      if case .typeText = action {
+        perception.state.elements = [.init(id: "body", role: "AXTextArea", label: "Body", value: "Hello world",
+          isFocused: true, textSelection: .init(location: 11, length: 0))]
+      }
+    }
+    let engine = FakeEngine()
+    await engine.setSelections([.focusInput, .type, .stop])
+    let controller = AutomationController(perception: perception, actionGenerator: .init(supportedApplications: []),
+      decisionEngine: engine, executor: executor, completionVerifier: DesktopActionCompletionVerifier(timeout: .milliseconds(120)))
+    controller.run(goal: "please type world")
+    await eventually { controller.status == .completed }
+    XCTAssertEqual(executor.actions, [.focusElement(elementID: "body", label: "Body"), .typeText(elementID: "body", text: "world")])
+    let goals = await engine.goals
+    XCTAssertEqual(goals, Array(repeating: "please type world", count: 3))
+    XCTAssertEqual(controller.history.filter(\.succeeded).count, 2)
+  }
+
+  func testJevCreatesOneNoteBeforeTypingAndStopsWithoutDuplicateInsertion() async {
+    let perception = FakePerception()
+    perception.state.activeApplication = .init(name: "Notes", bundleIdentifier: "com.apple.Notes", processIdentifier: 123)
+    perception.state.focusedElementID = "body"
+    perception.state.elements = [.init(id: "old", role: "AXRow", label: "Existing", isSelected: true),
+      .init(id: "body", role: "AXTextArea", label: "Body", value: "Existing text", isFocused: true)]
+    let executor = FakeExecutor()
+    executor.onExecute = { action in
+      if case .notesCreateNote = action {
+        perception.state.elements = [.init(id: "old", role: "AXRow", label: "Existing"),
+          .init(id: "new", role: "AXRow", label: "New Note", isSelected: true),
+          .init(id: "body", role: "AXTextArea", label: "Body", value: "", isFocused: true, textSelection: .init(location: 0, length: 0))]
+      }
+      if case .typeText = action {
+        perception.state.elements = [.init(id: "new", role: "AXRow", label: "Hello", isSelected: true),
+          .init(id: "body", role: "AXTextArea", label: "Body", value: "Hello", isFocused: true)]
+      }
+    }
+    let engine = FakeEngine()
+    await engine.setSelections([.newNote, .type, .stop])
+    let controller = AutomationController(perception: perception, actionGenerator: .init(supportedApplications: []),
+      decisionEngine: engine, executor: executor, completionVerifier: DesktopActionCompletionVerifier(timeout: .milliseconds(120)))
+    controller.run(goal: "create a new note and write Hello")
+    await eventually { controller.status == .completed }
+    XCTAssertEqual(executor.actions, [.notesCreateNote, .typeText(elementID: "body", text: "Hello")])
+    XCTAssertFalse(controller.availableActions.contains { $0.action == .notesCreateNote || $0.action == .typeText(elementID: "body", text: "Hello") })
+  }
+
+  func testCaretChangeDuringJevRequestStopsTypingBeforeAnyEffect() async {
+    let perception = FakePerception()
+    perception.state.focusedElementID = "body"
+    perception.state.elements = [.init(id: "body", role: "AXTextArea", value: "abc", isFocused: true,
+      textSelection: .init(location: 3, length: 0))]
+    let engine = FakeEngine(.type, delayed: true)
+    let executor = FakeExecutor()
+    let controller = AutomationController(perception: perception, actionGenerator: .init(supportedApplications: []), decisionEngine: engine, executor: executor)
+    controller.run(goal: "type hello")
+    await eventually { controller.currentRun?.requests.count == 1 }
+    perception.state.elements = [.init(id: "body", role: "AXTextArea", value: "abc", isFocused: true,
+      textSelection: .init(location: 0, length: 0))]
+    await engine.release()
+    await eventually { controller.currentRun?.outcome == .failed }
+    XCTAssertTrue(executor.actions.isEmpty)
+  }
+
+  func testChangedTerminalInputCannotInheritApproval() async {
+    let perception = FakePerception()
+    perception.state = DesktopState(activeApplication: .init(name: "Terminal", bundleIdentifier: "com.apple.Terminal", processIdentifier: 123),
+      focusedElementID: "input", elements: [.init(id: "input", role: "AXTextArea", value: "$ ", isFocused: true)])
+    let executor = FakeExecutor()
+    let controller = AutomationController(perception: perception,
+      actionGenerator: .init(supportedApplications: [], terminalExecutionEnabled: { true }),
+      decisionEngine: FakeEngine(.terminalRun), executor: executor)
+    controller.run(goal: "run command pwd")
+    await eventually { controller.pendingConfirmation != nil }
+    perception.state.elements = [.init(id: "input", role: "AXTextArea", value: "$ unrelated command", isFocused: true)]
+    controller.confirmPendingAction()
+    await eventually { controller.currentRun?.outcome == .failed }
+    XCTAssertTrue(executor.actions.isEmpty)
+  }
+
+  func testExactTypingAndSearchRejectUnrelatedChangesAndWrongApp() async {
+    let perception = FakePerception()
+    perception.state.focusedElementID = "body"
+    perception.state.elements = [.init(id: "body", role: "AXTextArea", label: "Body", value: "hello", isFocused: true)]
+    let before = perception.state
+    let verifier = DesktopActionCompletionVerifier(timeout: .milliseconds(60))
+    perception.state.elements = [.init(id: "body", role: "AXTextArea", label: "Body", value: "hello!", isFocused: true)]
+    let falseTyping = await verifier.verify(action: .typeText(elementID: "body", text: "hello"), before: before, perception: perception)
+    XCTAssertFalse(falseTyping.succeeded)
+    perception.state.elements = [.init(id: "body", role: "AXTextArea", value: "resumes", isFocused: true)]
+    let falseSearch = await verifier.verify(action: .searchInApp(query: "resumes"), before: before, perception: perception)
+    XCTAssertFalse(falseSearch.succeeded)
+    perception.state.elements = [.init(id: "search", role: "AXTextField", subrole: "AXSearchField", value: "resumes", isFocused: true)]
+    let search = await verifier.verify(action: .searchInApp(query: "resumes"), before: before, perception: perception)
+    XCTAssertTrue(search.succeeded)
+    perception.state.activeApplication = .init(name: "Other", bundleIdentifier: "test.other", processIdentifier: 456)
+    let wrongApp = await verifier.verify(action: .searchInApp(query: "resumes"), before: before, perception: perception)
+    XCTAssertFalse(wrongApp.succeeded)
+  }
+
+  func testNotesRequiresNewSelectionAndEmptyEditorNotJustWindowChanges() async {
+    let perception = FakePerception()
+    perception.state.activeApplication = .init(name: "Notes", bundleIdentifier: "com.apple.Notes", processIdentifier: 123)
+    perception.state.elements = [.init(id: "body", role: "AXTextArea", value: "", isFocused: true),
+      .init(id: "row", role: "AXRow", label: "New Note", isSelected: true)]
+    let before = perception.state
+    perception.state.windows = [.init(id: "window", title: "Changed", role: "AXWindow", isFocused: true)]
+    let result = await DesktopActionCompletionVerifier(timeout: .milliseconds(60)).verify(action: .notesCreateNote, before: before, perception: perception)
+    XCTAssertFalse(result.succeeded)
   }
 
   func testCompletionPollingFindsEffectWhenNoNotificationArrives() async {
@@ -796,6 +925,20 @@ final class RuntimeTests: XCTestCase {
     let result = await verifier.verify(action: .finderOpenItem(elementID: "item", url: "/tmp/report.pdf"),
       before: before, perception: perception)
     XCTAssertFalse(result.succeeded)
+  }
+
+  func testFinderSelectionUsesFileURLRatherThanReusedElementID() async {
+    let perception = FakePerception()
+    perception.state.activeApplication = .init(name: "Finder", bundleIdentifier: "com.apple.finder", processIdentifier: 123)
+    perception.state.elements = [.init(id: "item", role: "AXRow", label: "resume.pdf", url: "/tmp/resume.pdf")]
+    let before = perception.state
+    let verifier = DesktopActionCompletionVerifier(timeout: .milliseconds(60))
+    perception.state.elements = [.init(id: "item", role: "AXRow", label: "other.pdf", url: "/tmp/other.pdf", isSelected: true)]
+    let wrong = await verifier.verify(action: .finderSelectItem(elementID: "item", url: "/tmp/resume.pdf"), before: before, perception: perception)
+    XCTAssertFalse(wrong.succeeded)
+    perception.state.elements = [.init(id: "reordered", role: "AXRow", label: "resume.pdf", url: "/tmp/resume.pdf", isSelected: true)]
+    let correct = await verifier.verify(action: .finderSelectItem(elementID: "item", url: "/tmp/resume.pdf"), before: before, perception: perception)
+    XCTAssertTrue(correct.succeeded)
   }
 
   func testStartUsesSelectedPresetAndSurfacesAutomaticPreparationProgress() async {

@@ -13,6 +13,7 @@ final class ModelCodingTests: XCTestCase {
       .clickElement(elementID: "button", label: "Run"),
       .focusElement(elementID: "field", label: "Search"),
       .typeText(elementID: "field", text: "exact text"),
+      .notesCreateNote,
       .pressKey(.escape),
       .scrollUp,
       .scrollDown,

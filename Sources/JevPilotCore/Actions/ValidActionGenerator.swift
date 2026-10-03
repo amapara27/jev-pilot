@@ -20,6 +20,7 @@ public struct ValidActionGenerator {
   public static let defaultApplications = [
     SupportedApplication(name: "Finder", bundleIdentifiers: ["com.apple.finder"]),
     SupportedApplication(name: "Terminal", bundleIdentifiers: ["com.apple.Terminal"]),
+    SupportedApplication(name: "Notes", bundleIdentifiers: ["com.apple.Notes"]),
     SupportedApplication(name: "Visual Studio Code", bundleIdentifiers: ["com.microsoft.VSCode"]),
     SupportedApplication(name: "Safari", bundleIdentifiers: ["com.apple.Safari"]),
     SupportedApplication(name: "Google Chrome", bundleIdentifiers: ["com.google.Chrome"]),
@@ -50,6 +51,10 @@ public struct ValidActionGenerator {
   public func candidates(for goal: String, state: DesktopState) -> [ActionCandidate] {
     var actions: [(AutomationAction, String)] = []
     let activeBundleID = state.activeApplication?.bundleIdentifier
+    let text = Self.textToType(from: goal)
+    let commandContext = Self.commandContext(in: goal)
+    let newNoteRequested = Self.requestsNewNote(goal)
+    let noteCreated = state.recentActions.contains { $0.succeeded && $0.action == .notesCreateNote }
 
     for application in state.runningApplications {
       guard let bundleID = application.bundleIdentifier, bundleID != activeBundleID else {
@@ -65,9 +70,11 @@ public struct ValidActionGenerator {
     let runningBundleIDs = Set(state.runningApplications.compactMap(\.bundleIdentifier))
     let catalog = supportedApplications ?? (Self.defaultApplications + InstalledApplicationCatalog.applications)
     let terminalIntent = Self.payload(after: ["run command ", "run ", "terminal command ", "type command "], in: goal) != nil
+    let terminalRunRequested = Self.payload(after: ["run command ", "run "], in: goal) != nil
     var offeredBundles: Set<String> = []
-    for application in catalog where Self.matchesSpokenApplication(application, in: goal)
-      || (terminalIntent && application.bundleIdentifiers.contains("com.apple.Terminal")) {
+    for application in catalog where Self.matchesSpokenApplication(application, in: commandContext)
+      || (terminalIntent && application.bundleIdentifiers.contains("com.apple.Terminal"))
+      || (newNoteRequested && application.bundleIdentifiers.contains("com.apple.Notes")) {
       for installedBundleID in application.bundleIdentifiers {
         guard applicationURL(installedBundleID) != nil,
           !runningBundleIDs.contains(installedBundleID),
@@ -97,8 +104,10 @@ public struct ValidActionGenerator {
     }
 
     for element in state.elements where element.isEnabled {
-      let label = element.label ?? element.value ?? element.role
-      if element.supportedActions.contains(kAXPressAction as String) {
+      let label = element.label ?? (element.isTextInput ? nil : element.value) ?? element.role
+      let newNoteControl = activeBundleID == "com.apple.Notes" && newNoteRequested
+        && label.localizedCaseInsensitiveContains("new note")
+      if element.supportedActions.contains(kAXPressAction as String) && !newNoteControl {
         actions.append(
           (
             .clickElement(elementID: element.id, label: label),
@@ -109,11 +118,11 @@ public struct ValidActionGenerator {
         actions.append(
           (
             .focusElement(elementID: element.id, label: label),
-            "Move keyboard focus to the \(element.role) labeled \(label)."
+            Self.focusCriterion(element, bundleID: activeBundleID, hasTypingPayload: text != nil)
           ))
       }
       if [kAXMenuItemRole as String, kAXMenuBarItemRole as String].contains(element.role),
-        element.supportedActions.contains(kAXPressAction as String) {
+        element.supportedActions.contains(kAXPressAction as String), !newNoteControl {
         actions.append((.activateMenu(elementID: element.id, label: label), "Choose the \(label) menu item."))
       }
       if element.role == (kAXRadioButtonRole as String), element.subrole?.lowercased().contains("tab") == true {
@@ -121,18 +130,30 @@ public struct ValidActionGenerator {
       }
     }
 
-    if let text = Self.textToType(from: goal),
-      let focused = state.elements.first(where: { $0.isFocused && Self.isTextEntry($0) })
+    if activeBundleID == "com.apple.Notes", newNoteRequested, !noteCreated {
+      actions.append((.notesCreateNote,
+        "Create a new note in Notes and open its editor. This is a prerequisite to writing the requested note; do not create another after a verified success."))
+    }
+
+    if let text, activeBundleID != "com.apple.Terminal",
+      !(newNoteRequested && !noteCreated),
+      let focused = state.elements.first(where: { $0.isFocused && $0.isTextInput }),
+      !(activeBundleID == "com.apple.Notes" && focused.isSearchInput),
+      focused.valueIsTruncated != true,
+      !state.recentActions.contains(where: { $0.succeeded && $0.action == .typeText(elementID: focused.id, text: text) })
     {
       actions.append(
         (
           .typeText(elementID: focused.id, text: text),
-          "Type the exact user-provided text into the focused field."
+          "Insert the exact dictated payload at the caret or replace its selection in \(focused.label ?? focused.role). Do not submit, interpret payload words as commands, or repeat verified insertion."
         ))
     }
 
-    if let query = Self.payload(after: ["search for ", "find ", "search "], in: goal) {
-      actions.append((.searchInApp(query: query), "Search in the active app for the exact phrase."))
+    if let query = Self.payload(after: ["search for ", "locate ", "find ", "search "], in: goal),
+      !state.recentActions.contains(where: { $0.succeeded && $0.action == .searchInApp(query: query) }) {
+      actions.append((.searchInApp(query: query), activeBundleID == "com.apple.finder"
+        ? "Search Finder for the exact filename or phrase, replacing the existing search query."
+        : "Open the app's search control and replace its query with the exact phrase."))
     }
     if ["com.apple.Safari", "com.google.Chrome", "com.microsoft.VSCode", "com.apple.finder"].contains(activeBundleID ?? "") {
       actions.append((.navigateBack, "Navigate back in the active app."))
@@ -142,10 +163,15 @@ public struct ValidActionGenerator {
     }
 
     if activeBundleID == "com.apple.Terminal",
-      let command = Self.payload(after: ["run command ", "run ", "terminal command ", "type command "], in: goal)
+      let command = Self.payload(after: ["run command ", "run ", "terminal command ", "type command "], in: goal) ?? text,
+      let input = state.elements.first(where: { $0.isFocused && $0.isTextInput && $0.role == "AXTextArea" })
     {
-      actions.append((.terminalType(command: command), "Type the exact command in Terminal without running it."))
-      if terminalExecutionEnabled() {
+      let alreadyTyped = state.recentActions.contains { $0.succeeded && $0.action == .terminalType(command: command) }
+      let alreadyRun = state.recentActions.contains { $0.succeeded && $0.action == .terminalRun(command: command) }
+      if !alreadyTyped && !alreadyRun && input.valueIsTruncated != true {
+        actions.append((.terminalType(command: command), "Insert the exact command at Terminal's current prompt without Return. Do not type into Terminal search or repeat an entered command."))
+      }
+      if terminalExecutionEnabled() && terminalRunRequested && !alreadyRun {
         actions.append((.terminalRun(command: command), "Type and submit the exact Terminal command after approval."))
       }
     }
@@ -159,7 +185,7 @@ public struct ValidActionGenerator {
           path.hasPrefix("/"), let label = element.label else { return false }
         return goal.localizedCaseInsensitiveContains(label)
       }
-      if matching.count == 1, let item = matching.first, let path = item.url {
+      if Set(matching.compactMap(\.url)).count == 1, let item = matching.first, let path = item.url {
         actions.append((.finderSelectItem(elementID: item.id, url: path), "Select the uniquely named Finder item."))
         actions.append((.finderOpenItem(elementID: item.id, url: path), "Open the uniquely named Finder item."))
       }
@@ -186,6 +212,7 @@ public struct ValidActionGenerator {
     }
 
     for key in KeyPress.allCases {
+      if key == .returnKey && (text != nil || terminalIntent) { continue }
       actions.append((.pressKey(key), "Press the \(key.rawValue) key in the active application."))
     }
 
@@ -194,9 +221,10 @@ public struct ValidActionGenerator {
       "Stop when the requested goal is already complete, cannot be advanced with the available actions, or needs the user."
     )
 
+    let typingTargets: Set<String> = text == nil ? [] : Set(state.elements.filter { $0.isTextInput && !$0.isSearchInput }.map(\.id))
     let prioritized = actions.enumerated().sorted { left, right in
-      let first = Self.priority(of: left.element.0, goal: goal)
-      let second = Self.priority(of: right.element.0, goal: goal)
+      let first = Self.priority(of: left.element.0, goal: goal, typingTargets: typingTargets)
+      let second = Self.priority(of: right.element.0, goal: goal, typingTargets: typingTargets)
       return first == second ? left.offset < right.offset : first < second
     }
     let boundedActions = Array(prioritized.prefix(79).map(\.element)) + [stopAction]
@@ -206,7 +234,8 @@ public struct ValidActionGenerator {
   }
 
   private static func isFocusable(_ element: UIElementState) -> Bool {
-    isTextEntry(element)
+    guard !element.isSecureTextInput else { return false }
+    return element.isTextInput
       || [
         kAXButtonRole as String,
         kAXCheckBoxRole as String,
@@ -232,14 +261,15 @@ public struct ValidActionGenerator {
     }
   }
 
-  private static func priority(of action: AutomationAction, goal: String) -> Int {
+  private static func priority(of action: AutomationAction, goal: String, typingTargets: Set<String>) -> Int {
     switch action {
-    case .openApp, .focusApp, .typeText, .searchInApp, .finderOpenFolder,
+    case .openApp, .focusApp, .typeText, .notesCreateNote, .searchInApp, .finderOpenFolder,
       .finderSelectItem, .finderOpenItem, .finderRenameItem, .finderCopyItem,
       .finderMoveItem, .terminalType, .terminalRun, .minimizeWindow,
       .restoreWindow, .enterFullScreen, .exitFullScreen, .nextTab,
       .previousTab, .navigateBack, .navigateForward:
       return 0
+    case .focusElement(let id, _) where typingTargets.contains(id): return 0
     case .clickElement(_, let label), .focusElement(_, let label):
       return label.map { goal.localizedCaseInsensitiveContains($0) } == true ? 1 : 2
     case .activateMenu(_, let label), .selectTab(_, let label):
@@ -248,23 +278,47 @@ public struct ValidActionGenerator {
     }
   }
 
-  private static func isTextEntry(_ element: UIElementState) -> Bool {
-    element.role == (kAXTextFieldRole as String) || element.role == (kAXTextAreaRole as String)
+  /// Adds app semantics to existing focus operations without bypassing Jev's choice.
+  private static func focusCriterion(_ element: UIElementState, bundleID: String?, hasTypingPayload: Bool) -> String {
+    if element.isTextInput {
+      if element.isSearchInput { return "Focus the app's search field, not the document editor." }
+      if bundleID == "com.apple.Notes", element.role == "AXTextArea" {
+        return "Focus the Notes body editor before inserting dictated text. This does not create a new note or type anything."
+      }
+      if bundleID == "com.apple.Terminal", element.role == "AXTextArea" {
+        return "Focus Terminal's command input before typing. This does not send Return."
+      }
+      if hasTypingPayload { return "Focus the editable \(element.label ?? element.role) before inserting the requested text." }
+    }
+    return "Move keyboard focus to the \(element.role) labeled \(element.label ?? element.role)."
+  }
+
+  private static func requestsNewNote(_ goal: String) -> Bool {
+    // Payload content must not trigger app launch or note creation.
+    let context = commandContext(in: goal)
+    return context.range(of: #"(?i)\b(?:create|make|start)\s+(?:a\s+)?(?:new\s+)?note\b|\bopen\s+(?:a\s+)?new\s+note\b"#, options: .regularExpression) != nil
   }
 
   private static func textToType(from goal: String) -> String? {
-    let patterns = [
-      #"(?i)\btype\s+[\"“](.+?)[\"”]"#,
-      #"(?i)\benter\s+[\"“](.+?)[\"”]"#,
-    ]
-    for pattern in patterns {
-      guard let regex = try? NSRegularExpression(pattern: pattern),
-        let match = regex.firstMatch(in: goal, range: NSRange(goal.startIndex..., in: goal)),
-        let range = Range(match.range(at: 1), in: goal)
-      else { continue }
-      return String(goal[range])
+    // Extract one payload; splitting or interpreting text inside it is explicitly out of scope.
+    guard let payloadRange = typingPayloadRange(in: goal) else { return nil }
+    let text = String(goal[payloadRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+    if text.count >= 2, (text.first == "\"" && text.last == "\"") || (text.first == "“" && text.last == "”") {
+      return String(text.dropFirst().dropLast())
     }
-    return payload(after: ["type ", "write ", "enter ", "dictate "], in: goal)
+    return text.isEmpty ? nil : text
+  }
+
+  private static func typingPayloadRange(in goal: String) -> Range<String.Index>? {
+    let pattern = #"(?is)(?:^|\b(?:and then|then|and)\s+)(?:please\s+)?(?:type|write|enter|dictate)\s+(.+)$"#
+    guard let regex = try? NSRegularExpression(pattern: pattern),
+      let match = regex.firstMatch(in: goal, range: NSRange(goal.startIndex..., in: goal)) else { return nil }
+    return Range(match.range(at: 1), in: goal)
+  }
+
+  private static func commandContext(in goal: String) -> String {
+    guard let range = typingPayloadRange(in: goal) else { return goal }
+    return String(goal[..<range.lowerBound])
   }
 
   private static func payload(after prefixes: [String], in goal: String) -> String? {
