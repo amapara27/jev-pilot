@@ -8,5 +8,21 @@ DerivedData/
 __pycache__/
 *.py[cod]
 *.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.log
+.venv/
+
+# Inactive Swift references retained only for local migration work.
+/Sources/
+/Resources/
+/Package.swift
+/Package.resolved
+/Tests/JevPilotCoreTests/
+/tests/JevPilotCoreTests/
+/legacy_swift/
 
 .codex
