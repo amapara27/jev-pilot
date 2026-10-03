@@ -15,5 +15,16 @@ if [[ ! -x "$app_dir/Contents/MacOS/JevPilot" ]]; then
   exit 1
 fi
 
-# -n ensures the launch argument reaches a new process; quit any old Jev Pilot first.
+# Prevent two instances fighting over foreground activation and microphone ownership.
+if pgrep -x JevPilot >/dev/null; then
+  print -u2 "Quit the running Jev Pilot first, then launch again."
+  exit 1
+else
+  task_process_status=$?
+  if [[ "$task_process_status" != "1" ]]; then
+    print -u2 "Cannot check for a running instance. Launch from an unrestricted Terminal."
+    exit 1
+  fi
+fi
+# -n ensures the explicit development argument reaches the fresh process.
 open -n "$app_dir" --args --jev-dev-env-file "$env_file"

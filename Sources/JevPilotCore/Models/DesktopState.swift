@@ -36,6 +36,14 @@ public struct DesktopState: Codable, Equatable, Sendable {
   }
 }
 
+extension DesktopState {
+  /// Activation is not readiness: require a visible window and usable non-menu controls.
+  var hasUsableFocusedWindow: Bool {
+    windows.contains { $0.id == focusedWindowID && !$0.isMinimized }
+      && elements.contains { $0.isEnabled && ["AXButton", "AXTextArea", "AXTextField", "AXRow", "AXCell", "AXScrollArea", "AXComboBox"].contains($0.role) }
+  }
+}
+
 /// Describes a running macOS application.
 public struct ApplicationState: Codable, Equatable, Hashable, Sendable {
   public let name: String
@@ -128,6 +136,12 @@ public struct TextSelection: Codable, Equatable, Sendable {
 }
 
 extension UIElementState {
+  /// Native identity is stable across snapshots; depth/value/selection are not identity.
+  func hasSameTarget(as other: Self) -> Bool {
+    id == other.id && role == other.role && subrole == other.subrole
+      && label == other.label && url == other.url && isEnabled == other.isEnabled
+      && Set(supportedActions) == Set(other.supportedActions)
+  }
   /// Shared eligibility for candidate generation, execution, and completion checks.
   var isTextInput: Bool {
     ["AXTextField", "AXTextArea", "AXComboBox"].contains(role)

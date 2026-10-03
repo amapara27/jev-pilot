@@ -86,9 +86,11 @@ final class DesktopTargetTracker {
   }
   private func remember(_ app: NSRunningApplication?) {
     guard let app, app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+      app.bundleIdentifier != Bundle.main.bundleIdentifier,
       app.activationPolicy == .regular else { return }
     lastExternalPID = app.processIdentifier
   }
+  var intendedProcessIdentifier: Int32? { lastExternalPID }
   func prepare(processIdentifier: Int32?) async throws {
     let ownPID = ProcessInfo.processInfo.processIdentifier
     let frontmost = NSWorkspace.shared.frontmostApplication
@@ -135,7 +137,7 @@ final class AppModel: ObservableObject {
 
   init() {
     UserDefaults.standard.register(defaults: ["inputPrice": 0.042, "outputPrice": 0.0])
-    store = RunStore()
+    store = RunStore(inMemory: NativeEndToEndRun.outputDirectory != nil)
     let store = store
     startup = StorageStartupCoordinator(loaders: [{ await store.load() }])
     let perception = AccessibilityPerception()
@@ -153,7 +155,8 @@ final class AppModel: ObservableObject {
       completionVerifier: DesktopActionCompletionVerifier(),
       prepareTarget: { try await target.prepare(processIdentifier: $0) }
     )
-    session = SessionCoordinator(controller: controller, speech: FluidAudioSpeechRecognizer())
+    session = SessionCoordinator(controller: controller, speech: FluidAudioSpeechRecognizer(),
+      intendedTarget: { target.intendedProcessIdentifier })
     Task { await actionGenerator.prepareInstalledApplications() }
     readiness.refresh()
     overlay = TranscriptPanel(session: session, controller: controller)
@@ -161,7 +164,10 @@ final class AppModel: ObservableObject {
       Task { @MainActor in self?.updateOverlay() }
     }.store(in: &subscriptions)
     let startup = startup
-    Task { await startup.load() }
+    Task {
+      await startup.load()
+      if NativeEndToEndRun.outputDirectory != nil { await NativeEndToEndRun.run(model: self) }
+    }
   }
   private func updateOverlay() {
     overlayHideTask?.cancel()

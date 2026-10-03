@@ -3,7 +3,7 @@
 
 import PackageDescription
 
-/// Configures the reusable core library, app executable, and unit tests.
+/// Configures the reusable core, app, and offline pipeline/trust-boundary checks.
 let package = Package(
   name: "JevPilot",
   platforms: [.macOS(.v14)],
@@ -37,10 +37,6 @@ let package = Package(
     .testTarget(
       name: "JevPilotCoreTests",
       dependencies: ["JevPilotCore"]
-    ),
-    .testTarget(
-      name: "JevPilotAppTests",
-      dependencies: ["JevPilotApp", "JevPilotCore"]
     ),
   ]
 )

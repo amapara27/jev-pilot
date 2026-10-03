@@ -83,15 +83,21 @@ public final class SessionCoordinator: ObservableObject {
   private var workTask: Task<Void, Never>?
   private var speechSegmentStartedAt: Date?
   private let queueLimit = 5
+  private let intendedTarget: @MainActor () -> Int32?
 
   public init(
     controller: AutomationController,
     speech: any SpeechProviding,
-    defaults: UserDefaults? = .standard
+    defaults: UserDefaults? = .standard,
+    intendedTarget: @escaping @MainActor () -> Int32? = {
+      let app = NSWorkspace.shared.frontmostApplication
+      return app?.bundleIdentifier != Bundle.main.bundleIdentifier ? app?.processIdentifier : nil
+    }
   ) {
     self.controller = controller
     self.speech = speech
     self.defaults = defaults
+    self.intendedTarget = intendedTarget
     showTranscript = defaults?.bool(forKey: "showTranscript") ?? false
     speechPreset = SpeechRecognitionPreset(
       rawValue: defaults?.string(forKey: "speechPreset") ?? ""
@@ -131,6 +137,7 @@ public final class SessionCoordinator: ObservableObject {
     queuePaused = false
     pauseReason = nil
     if controller.status.isActive { controller.cancel() }
+    controller.clearTargetContext()
     invalidate(clearTranscript: captureState == .listening || isPreparing)
     captureState = .stopped
     state = .stopped
@@ -241,8 +248,8 @@ public final class SessionCoordinator: ObservableObject {
       pauseReason = "Queue full. Resume or clear pending commands before speaking more."
       return
     }
-    let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
-    let target = frontmost != ProcessInfo.processInfo.processIdentifier ? frontmost : nil
+    // Unnamed follow-ups inherit verified task context, not a chat opened during speech.
+    let target = controller.verifiedTargetProcessIdentifier ?? intendedTarget()
     queuedGoals.append(QueuedGoal(text: goal, intendedProcessIdentifier: target,
       speechMilliseconds: speechMilliseconds))
     startNextIfIdle()
@@ -263,7 +270,7 @@ public final class SessionCoordinator: ObservableObject {
     let next = queuedGoals.removeFirst()
     activeGoal = next
     state = captureState == .listening ? .listening : .askingJev
-    controller.run(goal: next.text, targetProcessIdentifier: next.intendedProcessIdentifier,
+    controller.run(goal: next.text, targetProcessIdentifier: controller.verifiedTargetProcessIdentifier ?? next.intendedProcessIdentifier,
       queuedAt: next.queuedAt, speechMilliseconds: next.speechMilliseconds)
   }
 

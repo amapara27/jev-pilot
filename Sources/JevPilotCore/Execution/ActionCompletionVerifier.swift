@@ -34,7 +34,9 @@ public final class DesktopActionCompletionVerifier: ActionCompletionVerifying {
 
   public func prepare(action: AutomationAction, before: DesktopState) {
     observation?.stop()
-    observation = DesktopChangeObservation(processIdentifier: before.activeApplication?.processIdentifier)
+    if let pid = before.activeApplication?.processIdentifier, NSRunningApplication(processIdentifier: pid) != nil {
+      observation = DesktopChangeObservation(processIdentifier: pid)
+    } else { observation = nil }
   }
 
   public func cancel() { observation?.stop(); observation = nil }
@@ -55,14 +57,6 @@ public final class DesktopActionCompletionVerifier: ActionCompletionVerifying {
   }
 
   private func inspect(action: AutomationAction, before: DesktopState, perception: DesktopPerceiving) -> ExecutionResult? {
-    if case .openApp(let bundleID, _) = action {
-      return NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID
-        ? .init(succeeded: true, message: "App is frontmost.") : nil
-    }
-    if case .focusApp(let bundleID, _) = action {
-      return NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID
-        ? .init(succeeded: true, message: "App is frontmost.") : nil
-    }
     switch action {
     case .finderRenameItem(_, let path, let name):
       let renamed = URL(fileURLWithPath: path).deletingLastPathComponent().appendingPathComponent(name).path
@@ -83,6 +77,9 @@ public final class DesktopActionCompletionVerifier: ActionCompletionVerifying {
       || after.focusedElementID != before.focusedElementID
       || after.windows != before.windows || after.elements != before.elements
     switch action {
+    case .openApp(let bundle, _), .focusApp(let bundle, _):
+      return after.activeApplication?.bundleIdentifier == bundle && after.hasUsableFocusedWindow
+        ? .init(succeeded: true, message: "Application window and controls are ready.") : nil
     case .focusElement(let id, _):
       return sameApplication(before, after) && before.focusedWindowID == after.focusedWindowID && after.focusedElementID == id
         ? .init(succeeded: true, message: "Target is focused.") : nil
@@ -98,11 +95,12 @@ public final class DesktopActionCompletionVerifier: ActionCompletionVerifying {
       guard sameApplication(before, after), after.activeApplication?.bundleIdentifier == "com.apple.Notes",
         let editor = after.elements.first(where: { $0.isFocused && $0.role == "AXTextArea" && $0.isTextInput && !$0.isSearchInput }),
         editor.value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true else { return nil }
-      let beforeRows = before.elements.filter { $0.role == "AXRow" }
-      let afterRows = after.elements.filter { $0.role == "AXRow" }
+      let beforeRows = before.elements.filter { ["AXRow", "AXCell"].contains($0.role) }
+      let afterRows = after.elements.filter { ["AXRow", "AXCell"].contains($0.role) }
       let editorAppeared = !before.elements.contains { $0.role == "AXTextArea" && !$0.isSearchInput }
       let selectionChanged = beforeRows.filter(\.isSelected) != afterRows.filter(\.isSelected)
-      guard editorAppeared || afterRows.count > beforeRows.count || selectionChanged else { return nil }
+      let editorCleared = before.elements.contains { $0.id == editor.id && !($0.value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) }
+      guard editorAppeared || editorCleared || afterRows.count > beforeRows.count || selectionChanged else { return nil }
       return .init(succeeded: true, message: "New note selection and empty editor verified.")
     case .closeWindow(let id, _):
       return !after.windows.contains(where: { $0.id == id })
@@ -156,8 +154,6 @@ public final class DesktopActionCompletionVerifier: ActionCompletionVerifying {
       return nil
     case .stop:
       return .init(succeeded: true, message: "Stopped.")
-    default:
-      return changed ? .init(succeeded: true, message: "Desktop changed as expected.") : nil
     }
   }
 

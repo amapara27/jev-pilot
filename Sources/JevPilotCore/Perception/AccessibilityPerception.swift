@@ -7,6 +7,8 @@ import Foundation
 @MainActor
 public final class AccessibilityPerception: DesktopPerceiving {
   private var elementRegistry: [String: AXUIElement] = [:]
+  private var previousRegistry: [String: AXUIElement] = [:]
+  private var nextElementID = 0
   public private(set) var observedProcessIdentifier: Int32?
   private var recentActions: [ActionRecord] = []
   private let maximumElements: Int
@@ -32,18 +34,21 @@ public final class AccessibilityPerception: DesktopPerceiving {
     guard let frontmost = NSWorkspace.shared.frontmostApplication else {
       throw PerceptionError.noFrontmostApplication
     }
+    previousRegistry = observedProcessIdentifier == frontmost.processIdentifier ? elementRegistry : [:]
     observedProcessIdentifier = frontmost.processIdentifier
     self.recentActions = recentActions
     elementRegistry.removeAll(keepingCapacity: true)
     let runningApplications = NSWorkspace.shared.runningApplications
-      .filter { $0.activationPolicy == .regular && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+      .filter { $0.activationPolicy == .regular && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier
+        && (Bundle.main.bundleIdentifier == nil || $0.bundleIdentifier != Bundle.main.bundleIdentifier) }
       .compactMap { application -> ApplicationState? in
         guard let name = application.localizedName else { return nil }
         return ApplicationState(name: name, bundleIdentifier: application.bundleIdentifier, processIdentifier: application.processIdentifier)
       }
       .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     // A voice command may launch an app even when the control center is the only frontmost app.
-    if frontmost.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+    if frontmost.processIdentifier == ProcessInfo.processInfo.processIdentifier
+      || (Bundle.main.bundleIdentifier != nil && frontmost.bundleIdentifier == Bundle.main.bundleIdentifier) {
       return DesktopState(runningApplications: runningApplications, isAccessibilityTrusted: true, recentActions: Array(recentActions.suffix(8)))
     }
     let appElement = AXUIElementCreateApplication(frontmost.processIdentifier)
@@ -180,7 +185,14 @@ public final class AccessibilityPerception: DesktopPerceiving {
   }
 
   private func register(_ element: AXUIElement, path: String) -> String {
-    let id = "ax:\(path)"
+    if let id = idForRegisteredElement(element) { return id }
+    let id: String
+    if let existing = previousRegistry.first(where: { CFEqual($0.value, element) })?.key {
+      id = existing
+    } else {
+      nextElementID += 1
+      id = "ax:\(observedProcessIdentifier ?? 0):\(nextElementID)"
+    }
     elementRegistry[id] = element
     return id
   }

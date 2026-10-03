@@ -47,17 +47,41 @@ public struct ValidActionGenerator {
     if supportedApplications == nil { await InstalledApplicationCatalog.prepare() }
   }
 
+  /// Explicit app names win over the app that happened to be frontmost at EOU.
+  func namedApplications(for goal: String, state: DesktopState) -> [SupportedApplication] {
+    let context = Self.commandContext(in: goal)
+    let appInstruction = ["open ", "launch ", "focus ", "switch to ", "use "].contains(where: context.lowercased().hasPrefix)
+      && !context.lowercased().hasPrefix("open folder ")
+    let catalog = supportedApplications ?? (Self.defaultApplications + InstalledApplicationCatalog.applications)
+    var found: [SupportedApplication] = []
+    var bundles: Set<String> = []
+    let running = state.runningApplications.compactMap { app -> SupportedApplication? in
+      guard let bundle = app.bundleIdentifier else { return nil }
+      return .init(name: app.name, bundleIdentifiers: [bundle])
+    }
+    for app in catalog + running {
+      let inferred = Self.requestsNewNote(goal) && app.bundleIdentifiers.contains("com.apple.Notes")
+        || Self.payload(after: ["run command ", "run ", "terminal command "], in: goal) != nil && app.bundleIdentifiers.contains("com.apple.Terminal")
+      guard inferred || (appInstruction && Self.matchesSpokenApplication(app, in: context)) else { continue }
+      for bundle in app.bundleIdentifiers where applicationURL(bundle) != nil && bundles.insert(bundle).inserted {
+        found.append(.init(name: app.name, bundleIdentifiers: [bundle]))
+      }
+    }
+    return found
+  }
+
   /// Keeps goal-specific choices first and a bounded set of generic AX controls.
   public func candidates(for goal: String, state: DesktopState) -> [ActionCandidate] {
     var actions: [(AutomationAction, String)] = []
     let activeBundleID = state.activeApplication?.bundleIdentifier
     let text = Self.textToType(from: goal)
-    let commandContext = Self.commandContext(in: goal)
     let newNoteRequested = Self.requestsNewNote(goal)
-    let noteCreated = state.recentActions.contains { $0.succeeded && $0.action == .notesCreateNote }
+    let requestedApps = namedApplications(for: goal, state: state)
+    let requestedBundles = Set(requestedApps.flatMap(\.bundleIdentifiers))
 
     for application in state.runningApplications {
-      guard let bundleID = application.bundleIdentifier, bundleID != activeBundleID else {
+      guard let bundleID = application.bundleIdentifier, bundleID != activeBundleID,
+        requestedBundles.contains(bundleID) else {
         continue
       }
       actions.append(
@@ -68,13 +92,10 @@ public struct ValidActionGenerator {
     }
 
     let runningBundleIDs = Set(state.runningApplications.compactMap(\.bundleIdentifier))
-    let catalog = supportedApplications ?? (Self.defaultApplications + InstalledApplicationCatalog.applications)
     let terminalIntent = Self.payload(after: ["run command ", "run ", "terminal command ", "type command "], in: goal) != nil
     let terminalRunRequested = Self.payload(after: ["run command ", "run "], in: goal) != nil
     var offeredBundles: Set<String> = []
-    for application in catalog where Self.matchesSpokenApplication(application, in: commandContext)
-      || (terminalIntent && application.bundleIdentifiers.contains("com.apple.Terminal"))
-      || (newNoteRequested && application.bundleIdentifiers.contains("com.apple.Notes")) {
+    for application in requestedApps {
       for installedBundleID in application.bundleIdentifiers {
         guard applicationURL(installedBundleID) != nil,
           !runningBundleIDs.contains(installedBundleID),
@@ -83,6 +104,9 @@ public struct ValidActionGenerator {
           "Launch \(application.name) (\(installedBundleID))."))
       }
     }
+
+    let mustSwitchApp = !requestedBundles.isEmpty && !requestedBundles.contains(activeBundleID ?? "")
+    if mustSwitchApp { return boundedCandidates(actions, goal: goal, state: state) }
 
     if let focusedWindowID = state.focusedWindowID,
       let focusedWindow = state.windows.first(where: { $0.id == focusedWindowID })
@@ -130,17 +154,17 @@ public struct ValidActionGenerator {
       }
     }
 
-    if activeBundleID == "com.apple.Notes", newNoteRequested, !noteCreated {
+    if activeBundleID == "com.apple.Notes", newNoteRequested {
       actions.append((.notesCreateNote,
         "Create a new note in Notes and open its editor. This is a prerequisite to writing the requested note; do not create another after a verified success."))
     }
 
     if let text, activeBundleID != "com.apple.Terminal",
-      !(newNoteRequested && !noteCreated),
+      !newNoteRequested,
       let focused = state.elements.first(where: { $0.isFocused && $0.isTextInput }),
       !(activeBundleID == "com.apple.Notes" && focused.isSearchInput),
-      focused.valueIsTruncated != true,
-      !state.recentActions.contains(where: { $0.succeeded && $0.action == .typeText(elementID: focused.id, text: text) })
+      activeBundleID != "com.apple.Notes" || focused.role == "AXTextArea",
+      focused.valueIsTruncated != true
     {
       actions.append(
         (
@@ -149,8 +173,7 @@ public struct ValidActionGenerator {
         ))
     }
 
-    if let query = Self.payload(after: ["search for ", "locate ", "find ", "search "], in: goal),
-      !state.recentActions.contains(where: { $0.succeeded && $0.action == .searchInApp(query: query) }) {
+    if let query = Self.payload(after: ["search for ", "locate ", "find ", "search "], in: goal) {
       actions.append((.searchInApp(query: query), activeBundleID == "com.apple.finder"
         ? "Search Finder for the exact filename or phrase, replacing the existing search query."
         : "Open the app's search control and replace its query with the exact phrase."))
@@ -166,12 +189,10 @@ public struct ValidActionGenerator {
       let command = Self.payload(after: ["run command ", "run ", "terminal command ", "type command "], in: goal) ?? text,
       let input = state.elements.first(where: { $0.isFocused && $0.isTextInput && $0.role == "AXTextArea" })
     {
-      let alreadyTyped = state.recentActions.contains { $0.succeeded && $0.action == .terminalType(command: command) }
-      let alreadyRun = state.recentActions.contains { $0.succeeded && $0.action == .terminalRun(command: command) }
-      if !alreadyTyped && !alreadyRun && input.valueIsTruncated != true {
+      if !terminalRunRequested && input.valueIsTruncated != true {
         actions.append((.terminalType(command: command), "Insert the exact command at Terminal's current prompt without Return. Do not type into Terminal search or repeat an entered command."))
       }
-      if terminalExecutionEnabled() && terminalRunRequested && !alreadyRun {
+      if terminalExecutionEnabled() && terminalRunRequested {
         actions.append((.terminalRun(command: command), "Type and submit the exact Terminal command after approval."))
       }
     }
@@ -212,15 +233,41 @@ public struct ValidActionGenerator {
     }
 
     for key in KeyPress.allCases {
+      if goal.lowercased().hasPrefix("press ") {
+        let requested = String(goal.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if key.rawValue != requested && !(key == .returnKey && requested == "enter") { continue }
+      }
       if key == .returnKey && (text != nil || terminalIntent) { continue }
       actions.append((.pressKey(key), "Press the \(key.rawValue) key in the active application."))
     }
 
-    let stopAction: (AutomationAction, String) = (
-      .stop(reason: "Goal complete or no safe valid action remains"),
-      "Stop when the requested goal is already complete, cannot be advanced with the available actions, or needs the user."
-    )
+    let instruction = CommandInstruction(text: goal)
+    if !instruction.completionKinds.isEmpty {
+      actions = actions.filter { action, _ in
+        if instruction.completionKinds.contains(action.kind) { return true }
+        switch action {
+        case .openApp, .focusApp: return true // Jev selects an inferred prerequisite app.
+        case .focusElement(let id, _):
+          return text != nil && state.elements.contains {
+            $0.id == id && $0.isTextInput && !$0.isSearchInput
+              && (activeBundleID != "com.apple.Notes" || $0.role == "AXTextArea")
+          }
+        default: return false
+        }
+      }
+    }
+    return boundedCandidates(actions, goal: goal, state: state)
+  }
 
+  /// Deduplicate concrete actions and keep STOP distinct from verified completion.
+  private func boundedCandidates(_ actions: [(AutomationAction, String)], goal: String, state: DesktopState) -> [ActionCandidate] {
+    var seen: Set<AutomationAction> = []
+    let actions = actions.filter { seen.insert($0.0).inserted }
+    let text = Self.textToType(from: goal)
+    let stopAction: (AutomationAction, String) = (
+      .stop(reason: "No safe action can advance this instruction"),
+      "Stop and report inability to proceed if no action safely advances the current instruction. STOP is not proof that the requested work happened."
+    )
     let typingTargets: Set<String> = text == nil ? [] : Set(state.elements.filter { $0.isTextInput && !$0.isSearchInput }.map(\.id))
     let prioritized = actions.enumerated().sorted { left, right in
       let first = Self.priority(of: left.element.0, goal: goal, typingTargets: typingTargets)
@@ -250,14 +297,17 @@ public struct ValidActionGenerator {
   }
 
   private static func matchesSpokenApplication(_ application: SupportedApplication, in goal: String) -> Bool {
-    if goal.localizedCaseInsensitiveContains(application.name) { return true }
+    func containsName(_ name: String) -> Bool {
+      goal.range(of: "\\b" + NSRegularExpression.escapedPattern(for: name) + "\\b", options: [.regularExpression, .caseInsensitive]) != nil
+    }
+    if containsName(application.name) { return true }
     let aliases: [String: [String]] = [
       "com.google.Chrome": ["Chrome"],
       "com.microsoft.VSCode": ["VS Code"],
       "com.apple.systempreferences": ["Settings"],
     ]
     return application.bundleIdentifiers.contains { id in
-      (aliases[id] ?? []).contains { goal.localizedCaseInsensitiveContains($0) }
+      (aliases[id] ?? []).contains(where: containsName)
     }
   }
 

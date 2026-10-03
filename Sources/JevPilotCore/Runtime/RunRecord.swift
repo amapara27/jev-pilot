@@ -29,6 +29,10 @@ public struct RequestMetric: Codable, Equatable, Sendable, Identifiable {
   public var inputTokens: Int?
   public var outputTokens: Int?
   public var isComplete: Bool
+  public var probabilityTotal: Double?
+  public var candidateCount: Int?
+  public var distributionNormalized: Bool?
+  public var validationFailure: String?
   public init(latencyMilliseconds: Int, inputTokens: Int? = nil, outputTokens: Int? = nil, isComplete: Bool = true) {
     self.latencyMilliseconds = latencyMilliseconds
     self.inputTokens = inputTokens
