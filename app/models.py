@@ -1,4 +1,4 @@
-"""Typed local records for candidate actions and validated Jev decisions."""
+"""Typed local records for executable app actions and validated semantic decisions."""
 
 from __future__ import annotations
 
@@ -12,22 +12,12 @@ JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSO
 
 @dataclass(frozen=True, slots=True)
 class ActionCandidate:
-    """Binds an opaque model-facing ID to one concrete local action."""
+    """Bind a locally resolved operation and target to one concrete app effect."""
 
     id: str
     kind: str
     parameters: dict[str, JSONValue]
     description: str
-
-    def criterion(self) -> dict[str, JSONValue]:
-        """Return structured Choice guidance without giving Jev executable authority."""
-
-        # Parameters describe a pre-built action; they are not model-generated input.
-        return {
-            "action": self.kind,
-            "description": self.description,
-            "parameters": self.parameters,
-        }
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible representation for terminal output."""
@@ -37,10 +27,12 @@ class ActionCandidate:
 
 @dataclass(frozen=True, slots=True)
 class JevDecision:
-    """Stores a fully validated Jev choice and its provider metadata."""
+    """Stores validated semantic factors and any locally executable action."""
 
-    selected_candidate: ActionCandidate
-    probabilities: dict[str, float]
+    selected_candidate: ActionCandidate | None
+    semantic: dict[str, JSONValue]
+    probabilities: dict[str, dict[str, float]]
+    factor_confidences: dict[str, float]
     confidence: float
     model: str
     request_id: str | None
@@ -52,10 +44,10 @@ class JevDecision:
         """Return the stable machine-readable decision payload."""
 
         return {
-            "selected_candidate": self.selected_candidate.to_dict(),
-            "probabilities": dict(
-                sorted(self.probabilities.items(), key=lambda item: item[1], reverse=True)
-            ),
+            "selected_candidate": self.selected_candidate.to_dict() if self.selected_candidate else None,
+            "semantic": self.semantic,
+            "probabilities": self.probabilities,
+            "factor_confidences": self.factor_confidences,
             "confidence": self.confidence,
             "model": self.model,
             "request_id": self.request_id,

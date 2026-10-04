@@ -12,6 +12,7 @@ from .models import ActionCandidate
 from .desktop import DesktopError, DesktopState
 from .safety import blocked_goal, disposition
 from .verification import verify_app
+from .semantics import SemanticError
 
 
 def run_goal(
@@ -26,11 +27,12 @@ def run_goal(
     """Run one bounded decision and return a compact, serializable audit record."""
 
     report: dict[str, object] = {
-        "schema_version": 1,
-        "goal": goal.strip(),
+        "schema_version": 2,
+        "goal": goal,
         "outcome": "failed",
         "effect_sent": False,
         "verified": False,
+        "completion_scope": "selected_action",
         "timings_ms": {},
     }
     started = perf_counter()
@@ -43,52 +45,53 @@ def run_goal(
         stage = now
 
     try:
-        if not report["goal"]:
+        if not goal.strip():
             raise DesktopError("Enter a nonempty text goal.")
         if blocked_goal(goal):
             report["outcome"] = "blocked"
-            report["reason"] = "This request is outside the first milestone's safety boundary."
+            report["reason"] = "This request is outside the local safety boundary."
             return report
 
         before: DesktopState = desktop.snapshot()
-        candidates = desktop.candidates(goal, before)
+        menu = desktop.semantic_menu(goal, before)
         report["observed_app"] = before.active.name if before.active else None
         report["accessibility_trusted"] = before.ax_trusted
-        report["candidates"] = [{"id": item.id, "kind": item.kind} for item in candidates]
+        report["target_ids"] = list(menu.targets)
+        report["payload_ids"] = list(menu.payloads)
         timing("observation")
-        if len(candidates) == 1 and candidates[0].kind == "STOP":
-            report["outcome"] = "unsupported"
-            report["reason"] = "No supported named-app action is available for this goal."
-            return report
 
         decision = select_action(
             goal,
             before.provider_state(),
-            candidates,
+            menu,
             api_key=load_api_key() if client is None else None,
             model=model,
             client=client,
         )
         action = decision.selected_candidate
-        report["decision"] = {
-            "id": action.id,
-            "kind": action.kind,
-            "confidence": decision.confidence,
-            "probabilities": decision.probabilities,
-            "model": decision.model,
-            "latency_ms": decision.latency_milliseconds,
-        }
+        report["decision"] = decision.to_dict()
         timing("jev")
-        if action.kind == "STOP":
+        if decision.semantic["operation"] == "STOP":
             report["outcome"] = "stopped"
             report["reason"] = "Jev selected STOP; no desktop effect was sent."
             return report
+        if action is None:
+            report["outcome"] = "unsupported"
+            report["reason"] = "The selected operation has no native executor yet; no effect was sent."
+            return report
 
-        fresh: DesktopState = desktop.snapshot()
-        if not before.active or not fresh.active or fresh.active.pid != before.active.pid:
-            raise DesktopError("The foreground app changed while Jev was deciding.")
-        if action not in desktop.candidates(goal, fresh):
-            raise DesktopError("The selected application is no longer a current action.")
+        def validate_target() -> None:
+            """Bind both decision and approval to the same live app facts."""
+
+            fresh: DesktopState = desktop.snapshot()
+            if fresh.active != before.active or fresh.active is None:
+                raise DesktopError("The foreground app changed while deciding or approving.")
+            target_id = decision.semantic["target_id"]
+            fresh_target = desktop.semantic_menu(goal, fresh).targets.get(target_id)
+            if fresh_target != decision.semantic["target"]:
+                raise DesktopError("The selected application is no longer a current action.")
+
+        validate_target()
         timing("fresh_target")
 
         policy = disposition(action, decision.confidence)
@@ -99,9 +102,12 @@ def run_goal(
         if dry_run:
             report["outcome"] = "dry_run"
             return report
-        if policy == "confirm" and not approve(action):
-            report["outcome"] = "rejected"
-            return report
+        if policy == "confirm":
+            if not approve(action):
+                report["outcome"] = "rejected"
+                return report
+            validate_target()
+            timing("approval")
 
         # Once dispatch begins, a timeout may still mean the OS received the effect.
         report["effect_sent"] = True
@@ -112,7 +118,7 @@ def run_goal(
         report["outcome"] = "completed" if report["verified"] else "unverified"
         if not report["verified"]:
             report["reason"] = "The app did not become frontmost; the effect was not retried."
-    except (DesktopError, JevCallError, ConfigurationError) as error:
+    except (DesktopError, JevCallError, ConfigurationError, SemanticError) as error:
         report["reason"] = str(error)
     except KeyboardInterrupt:
         report["outcome"] = "cancelled"

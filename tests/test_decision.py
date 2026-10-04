@@ -1,181 +1,122 @@
-"""Offline tests for Jev request construction and closed-set response validation."""
+"""Check all three closed-set answers before local semantic resolution."""
 
 from __future__ import annotations
 
 import math
 import unittest
 from types import SimpleNamespace
-from typing import Any
 
-from app.decision import JevCallError, QUESTION_ID, build_jev_state, select_action
-from app.models import ActionCandidate
+from app.decision import JevCallError, select_action
+from app.desktop import AppState, DesktopState, MacDesktop
+from app.semantics import SemanticError
 
 
-class FakeClient:
-    """Records one SDK-shaped call and returns a supplied response."""
+class Workspace:
+    """Ground just Safari and Terminal as installed applications."""
 
-    def __init__(self, response: Any) -> None:
-        self.response = response
-        self.calls: list[tuple[Any, Any, str | None]] = []
+    def URLForApplicationWithBundleIdentifier_(self, bundle_id):
+        return object() if bundle_id in {"com.apple.Safari", "com.apple.Terminal"} else None
 
-    def system_one(
-        self, state: Any, questions: Any, *, model: str | None = None
-    ) -> Any:
-        # Capture the exact outbound contract while keeping every test offline.
+
+class Client:
+    """Build SDK-shaped responses from the exact outgoing factor menus."""
+
+    def __init__(self, *, operation="FOCUS_APP", target="com.apple.Terminal", payload="none", mutate=None):
+        self.operation, self.target, self.payload = operation, target, payload
+        self.mutate = mutate
+        self.calls = []
+
+    def system_one(self, state, questions, *, model=None):
         self.calls.append((state, questions, model))
-        return self.response
+        selected = {"operation": self.operation, "target": self.target, "payload": self.payload}
+        choices = {}
+        for name, question in questions.items():
+            key = selected[name]
+            choices[name] = SimpleNamespace(choice=key, probabilities={item: float(item == key) for item in question.criteria}, confidence=0.9)
+        if self.mutate:
+            self.mutate(choices)
+        return SimpleNamespace(choices=choices, model="offline", request_id="test", usage=SimpleNamespace(input_tokens=10, output_tokens=3))
 
 
-def candidates() -> tuple[ActionCandidate, ...]:
-    """Return a compact deterministic candidate set for adapter tests."""
+class SemanticDecisionTests(unittest.TestCase):
+    """Enumerated trust-boundary failures apply to each independent factor."""
 
-    return (
-        ActionCandidate(
-            id="action_0",
-            kind="FOCUS_APP",
-            parameters={"bundle_identifier": "com.apple.Terminal", "name": "Terminal"},
-            description="Bring Terminal to the foreground.",
-        ),
-        ActionCandidate(
-            id="action_1",
-            kind="STOP",
-            parameters={"reason": "goal complete"},
-            description="Stop when the goal is complete.",
-        ),
-    )
+    def setUp(self):
+        self.desktop = MacDesktop.__new__(MacDesktop)
+        self.desktop.workspace = Workspace()
+        self.state = DesktopState(AppState("Safari", "com.apple.Safari", 1), (AppState("Safari", "com.apple.Safari", 1), AppState("Terminal", "com.apple.Terminal", 2)), True, True)
 
+    def choose(self, client, goal="Switch to Terminal"):
+        return select_action(goal, self.state.provider_state(), self.desktop.semantic_menu(goal, self.state), client=client)
 
-def response(
-    *,
-    choice: str = "action_0",
-    probabilities: dict[str, float] | None = None,
-    confidence: float = 0.8,
-) -> Any:
-    """Build the SDK response surface consumed by the adapter."""
+    def test_single_request_contains_all_operations_targets_and_exact_spans(self):
+        client = Client(operation="TYPE_TEXT", target="com.apple.Safari", payload="span_0")
+        decision = self.choose(client, 'Type "Terminal and run 🦊  now!"')
+        self.assertIsNone(decision.selected_candidate)
+        self.assertEqual(decision.semantic["payload"]["text"], "Terminal and run 🦊  now!")
+        self.assertEqual(len(client.calls), 1)
+        state, questions, _ = client.calls[0]
+        self.assertEqual(state["semantic_options"]["payloads"], self.desktop.semantic_menu('Type "Terminal and run 🦊  now!"', self.state).payloads)
+        self.assertEqual(set(questions), {"operation", "target", "payload"})
+        self.assertIn("RUN_COMMAND", questions["operation"].criteria)
+        self.assertIn("UNSUPPORTED", questions["operation"].criteria)
+        self.assertIn("com.apple.Safari", questions["target"].criteria)
 
-    answer = SimpleNamespace(
-        choice=choice,
-        probabilities=probabilities or {"action_0": 0.8, "action_1": 0.2},
-        confidence=confidence,
-    )
-    return SimpleNamespace(
-        choices={QUESTION_ID: answer},
-        model="jev-1.13.0",
-        request_id="request-test",
-        usage=SimpleNamespace(input_tokens=123, output_tokens=17),
-    )
+    def test_each_factor_rejects_bad_answers(self):
+        failures = {
+            "unknown": lambda a: setattr(a, "choice", "invented"),
+            "keys": lambda a: setattr(a, "probabilities", {"invented": 1.0}),
+            "nan": lambda a: setattr(a, "probabilities", dict.fromkeys(a.probabilities, math.nan)),
+            "boolean": lambda a: setattr(a, "probabilities", dict.fromkeys(a.probabilities, True)),
+            "range": lambda a: setattr(a, "probabilities", dict.fromkeys(a.probabilities, -1)),
+            "total": lambda a: setattr(a, "probabilities", dict.fromkeys(a.probabilities, 0.0)),
+            "confidence": lambda a: setattr(a, "confidence", math.inf),
+            "winner": lambda a: setattr(a, "choice", next(k for k in a.probabilities if k != a.choice)),
+        }
+        for factor in ("operation", "target", "payload"):
+            for name, failure in failures.items():
+                with self.subTest(factor=factor, failure=name), self.assertRaises(JevCallError):
+                    self.choose(Client(mutate=lambda choices: failure(choices[factor])), 'Switch to Terminal, not "hello"')
+            with self.subTest(factor=factor, failure="missing"), self.assertRaises(JevCallError):
+                self.choose(Client(mutate=lambda choices: choices.pop(factor)))
 
+    def test_incompatible_factors_never_resolve_to_action(self):
+        for operation, target, payload in (
+            ("STOP", "com.apple.Terminal", "none"),
+            ("FOCUS_APP", "com.apple.Terminal", "span_0"),
+            ("OPEN_APP", "com.apple.Terminal", "none"),
+            ("FOCUS_APP", "com.apple.Safari", "none"),
+            ("TYPE_TEXT", "none", "none"),
+            ("CREATE_NOTE", "com.apple.Terminal", "none"),
+            ("RUN_COMMAND", "com.apple.Safari", "span_0"),
+        ):
+            with self.subTest(operation=operation, target=target, payload=payload), self.assertRaises(JevCallError):
+                self.choose(Client(operation=operation, target=target, payload=payload), 'Type "hello"')
 
-class JevClientTests(unittest.TestCase):
-    """Verifies the provider never escapes the locally supplied candidates."""
+    def test_minimum_confidence_and_local_action(self):
+        client = Client(mutate=lambda answers: setattr(answers["target"], "confidence", 0.3))
+        decision = self.choose(client)
+        self.assertEqual(decision.confidence, 0.3)
+        self.assertEqual(decision.selected_candidate.kind, "FOCUS_APP")
+        self.assertEqual(decision.selected_candidate.parameters["bundle_identifier"], "com.apple.Terminal")
 
-    def test_formats_state_and_exact_choice_criteria(self) -> None:
-        fake = FakeClient(response())
+    def test_exact_unquoted_alternatives_and_bounds(self):
+        goal = "type café 🦊 and run later in Terminal"
+        menu = self.desktop.semantic_menu(goal, self.state)
+        texts = [value["text"] for key, value in menu.payloads.items() if key != "none"]
+        self.assertIn("café 🦊 and run later in Terminal", texts)
+        self.assertIn("café 🦊 and run later", texts)
+        for key, span in menu.payloads.items():
+            if key != "none":
+                self.assertEqual(goal[span["start"]:span["end"]], span["text"])
+        with self.assertRaisesRegex(SemanticError, "limit"):
+            self.desktop.semantic_menu("x" * 8193, self.state)
 
-        decision = select_action(
-            "  Switch to Terminal.  ",
-            {"active_application": {"name": "Safari"}},
-            candidates(),
-            client=fake,
-        )
-
-        self.assertEqual(decision.selected_candidate.id, "action_0")
-        self.assertEqual(decision.model, "jev-1.13.0")
-        self.assertEqual(decision.request_id, "request-test")
-        self.assertEqual(decision.input_tokens, 123)
-        self.assertEqual(decision.output_tokens, 17)
-        self.assertEqual(len(fake.calls), 1)
-        state, questions, model = fake.calls[0]
-        self.assertEqual(
-            state,
-            {
-                "transcription": "Switch to Terminal.",
-                "desktop_state": {"active_application": {"name": "Safari"}},
-            },
-        )
-        self.assertEqual(model, "jev-latest")
-        choice_question = questions[QUESTION_ID]
-        self.assertEqual(set(choice_question.criteria), {"action_0", "action_1"})
-        self.assertEqual(choice_question.criteria["action_0"]["action"], "FOCUS_APP")
-        self.assertEqual(
-            choice_question.criteria["action_0"]["parameters"]["bundle_identifier"],
-            "com.apple.Terminal",
-        )
-
-    def test_rejects_empty_transcription_and_candidates(self) -> None:
-        with self.assertRaisesRegex(JevCallError, "transcription"):
-            build_jev_state("   ", {})
-        with self.assertRaisesRegex(JevCallError, "At least one"):
-            select_action("Do something", {}, (), client=FakeClient(response()))
-
-    def test_rejects_duplicate_candidate_ids(self) -> None:
-        duplicate = (candidates()[0], candidates()[0])
-        with self.assertRaisesRegex(JevCallError, "unique"):
-            select_action("Switch apps", {}, duplicate, client=FakeClient(response()))
-
-    def test_rejects_unknown_choice(self) -> None:
-        with self.assertRaisesRegex(JevCallError, "unknown"):
-            select_action(
-                "Switch apps", {}, candidates(), client=FakeClient(response(choice="invented"))
-            )
-
-    def test_rejects_probability_key_mismatch(self) -> None:
-        mismatches = (
-            {"action_0": 1.0},
-            {"action_0": 0.8, "action_1": 0.1, "invented": 0.1},
-        )
-        for probabilities in mismatches:
-            with self.subTest(probabilities=probabilities):
-                with self.assertRaisesRegex(JevCallError, "keys"):
-                    select_action(
-                        "Switch apps",
-                        {},
-                        candidates(),
-                        client=FakeClient(response(probabilities=probabilities)),
-                    )
-
-    def test_rejects_invalid_probability_values(self) -> None:
-        cases = (
-            {"action_0": math.nan, "action_1": math.nan},
-            {"action_0": 1.1, "action_1": -0.1},
-            {"action_0": 0.4, "action_1": 0.4},
-        )
-        for probabilities in cases:
-            with self.subTest(probabilities=probabilities):
-                with self.assertRaises(JevCallError):
-                    select_action(
-                        "Switch apps",
-                        {},
-                        candidates(),
-                        client=FakeClient(response(probabilities=probabilities)),
-                    )
-
-    def test_rejects_non_maximal_selection(self) -> None:
-        with self.assertRaisesRegex(JevCallError, "maximum-probability"):
-            select_action(
-                "Switch apps",
-                {},
-                candidates(),
-                client=FakeClient(
-                    response(
-                        choice="action_0",
-                        probabilities={"action_0": 0.2, "action_1": 0.8},
-                    )
-                ),
-            )
-
-    def test_rejects_invalid_confidence(self) -> None:
-        with self.assertRaisesRegex(JevCallError, "confidence"):
-            select_action(
-                "Switch apps",
-                {},
-                candidates(),
-                client=FakeClient(response(confidence=1.2)),
-            )
-
-    def test_requires_api_key_for_owned_client(self) -> None:
+    def test_empty_goal_and_missing_key(self):
+        with self.assertRaises(SemanticError):
+            self.choose(Client(), " ")
         with self.assertRaisesRegex(JevCallError, "API key"):
-            select_action("Switch apps", {}, candidates())
+            select_action("Switch to Terminal", {}, self.desktop.semantic_menu("Switch to Terminal", self.state))
 
 
 if __name__ == "__main__":

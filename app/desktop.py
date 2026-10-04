@@ -1,9 +1,8 @@
-"""Read macOS app state and perform only locally named app actions."""
+"""Ground installed application targets and perform locally resolved app actions."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import re
 from time import monotonic
 
 import ApplicationServices as AX
@@ -11,6 +10,7 @@ from AppKit import NSWorkspace, NSWorkspaceOpenConfiguration
 from Foundation import NSDate, NSRunLoop
 
 from .models import ActionCandidate
+from .semantics import SemanticMenu, extract_payloads
 
 
 @dataclass(frozen=True)
@@ -24,7 +24,7 @@ class AppState:
 
 @dataclass(frozen=True)
 class DesktopState:
-    """The compact state needed for the first app-control milestone."""
+    """Compact native facts used to ground semantic choices and recheck effects."""
 
     active: AppState | None
     running: tuple[AppState, ...]
@@ -90,42 +90,28 @@ class MacDesktop:
             focused = error == AX.kAXErrorSuccess and window is not None
         return DesktopState(active, running, trusted, focused)
 
-    def candidates(self, goal: str, state: DesktopState) -> tuple[ActionCandidate, ...]:
-        """Offer only an explicitly named installed app plus STOP."""
+    def semantic_menu(self, goal: str, state: DesktopState) -> SemanticMenu:
+        """Ground all supported installed apps without locally classifying the goal."""
 
-        actions: list[ActionCandidate] = []
+        payloads = extract_payloads(goal)
+        targets = {"none": {"description": "No grounded target."}}
         for name, bundle_id, aliases in SUPPORTED_APPS:
-            if not any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", goal, re.IGNORECASE) for alias in aliases):
-                continue
-            if state.active and state.active.bundle_id == bundle_id:
-                continue
             if self.workspace.URLForApplicationWithBundleIdentifier_(bundle_id) is None:
                 continue
-            running = any(app.bundle_id == bundle_id for app in state.running)
-            kind = "FOCUS_APP" if running else "OPEN_APP"
-            actions.append(
-                ActionCandidate(
-                    id=f"action_{len(actions)}",
-                    kind=kind,
-                    parameters={"bundle_identifier": bundle_id, "name": name},
-                    description=f"{'Focus' if running else 'Open'} {name}.",
-                )
-            )
-        actions.append(
-            ActionCandidate(
-                id=f"action_{len(actions)}",
-                kind="STOP",
-                parameters={},
-                description="Stop when the goal is complete or no supplied action advances it.",
-            )
-        )
-        return tuple(actions)
+            targets[bundle_id] = {
+                "name": name, "bundle_identifier": bundle_id, "aliases": list(aliases),
+                "running": any(app.bundle_id == bundle_id for app in state.running),
+                "active": bool(state.active and state.active.bundle_id == bundle_id),
+                "process_identifiers": sorted(app.pid for app in state.running if app.bundle_id == bundle_id),
+                "scope": "Application only; no editable field or control is grounded yet.",
+            }
+        return SemanticMenu(goal, targets, payloads)
 
     def execute(self, action: ActionCandidate) -> None:
         """Request one AppKit activation and wait for its native completion callback."""
 
         if action.kind not in {"OPEN_APP", "FOCUS_APP"}:
-            raise DesktopError("This action is not executable in the first Python milestone.")
+            raise DesktopError("This operation has no native executor yet.")
         bundle_id = action.parameters.get("bundle_identifier")
         if not isinstance(bundle_id, str):
             raise DesktopError("The selected app has no valid bundle identifier.")
