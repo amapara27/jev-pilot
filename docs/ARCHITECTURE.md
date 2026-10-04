@@ -1,51 +1,161 @@
 # Jev Pilot architecture
 
-This document describes the code that runs today and the boundaries guiding its development. The user-facing setup and supported commands are in the [README](../README.md); the long-term voice-control direction is summarized there and detailed in `.codex/roadmap.md` for local development.
-
-## Current runtime
-
-`python -m app` accepts one typed goal and can perform at most one app activation. It does not currently use speech recognition or control elements inside apps.
+The active runtime is `python -m app`: text goals, one factorized Jev request per
+step, bounded typing preparation, native app/editor effects, and verified reports.
+Swift sources are retired references, not a fallback runtime.
 
 ```text
-goal
-  → block sensitive wording locally
-  → observe foreground/running apps
-  → generate installed, explicitly named app candidates + STOP
-  → ask Jev to select one candidate
-  → validate Jev's answer
-  → re-observe and confirm the candidate is still valid
-  → apply local safety / ask for approval
-  → open or focus one app with AppKit
-  → verify foreground identity and report outcome
+goal → sensitive-goal block → native app + bounded AX editor snapshot
+  → installed application targets + field targets + exact payload spans
+  → one Jev request: operation / target / payload
+  → validate each distribution and the combination
+  → fresh identity/text/caret check → local safety / approval → fresh check
+  → native activation / field focus / exact insertion → outcome verification
+  → continue only for explicit typing prerequisites, at most four steps
 ```
 
 ## Responsibilities
 
 | Module | Responsibility |
 |---|---|
-| `app/cli.py` | Parse the goal and options, request approval when needed, save and print the report. |
-| `app/runtime.py` | Orchestrate one bounded run and record stage timings/outcome. |
-| `app/desktop.py` | Observe foreground/running applications, generate named-app candidates, and request AppKit activation. AX is only queried for trust/focused-window readiness; it does not inspect or operate controls. |
-| `app/decision.py` | Build one TypeSafe Choice request, call Jev, validate its response, and resolve its selected ID. |
-| `app/models.py` | Define local candidate and validated decision records. |
-| `app/safety.py` | Block selected sensitive goals before provider access and apply the post-choice confidence rule. |
-| `app/verification.py` | Poll for the requested app's bundle ID becoming frontmost; never retry an uncertain effect. |
-| `app/config.py` | Load the TypeSafe key from the environment or `.env`. |
+| `app/cli.py` | Input/options, approval, atomic report output, exit status. |
+| `app/runtime.py` | Bounded preparation/insertion flow, fresh checks, safety, timings, reports. |
+| `app/desktop.py` | AppKit observation/activation, app/field menus, final native guard before dispatch. |
+| `app/text_input.py` | Bounded AX editor discovery, identity continuity, local document/caret facts, UTF-16 replacement, guarded text/focus dispatch. |
+| `app/semantics.py` | Operation vocabulary, exact goal spans, combination checks, local action resolution. |
+| `app/decision.py` | Three Choices in one TypeSafe call per step; strict response validation. |
+| `app/models.py` | Executable actions and validated semantic decisions. |
+| `app/safety.py` | Sensitive-goal blocking and local confidence approval. |
+| `app/verification.py` | Verify foreground, focused identity, or exact resulting text/caret; never replay. |
+| `app/config.py` | Environment/`.env` keys parsed as data, excluded from reports. |
 
-## Jev's authority boundary
+## Semantic authority and preparation
 
-`MacDesktop.candidates()` creates each `ActionCandidate` locally, including its opaque ID, operation (`OPEN_APP` or `FOCUS_APP`), bundle ID, and description. `decision.build_choice()` exposes those options as `Choice.criteria`. Jev returns an ID and decision metadata, not an executable command. `decision.py` checks that the ID and probability keys match the supplied set, validates the numeric values and winner, then returns the original local candidate. The candidate ID only has meaning through that request's local lookup.
+All operations remain visible independently of local verb recognition. Installed
+catalog apps plus the current foreground app are targets. TextEdit is in the
+catalog. AX fields have a separate `field` scope and request-local identity IDs;
+application targets cannot execute TYPE_TEXT. Local parsing proposes exact quote
+interiors and unquoted suffix boundaries, not the operation. Limits remain 8192
+goal characters and 16 span proposals; overflow fails before provider access.
 
-The runtime independently checks the foreground has not changed and that the selected app action is still available. Sensitive credential, payment, purchase, and destructive wording is blocked before Jev receives a request. Only app-open/focus actions are executable in this milestone. Confidence below 0.65 prompts for approval; `--yes` only pre-approves that prompt. `STOP` does not execute. Completion is reported only after the requested bundle is observed frontmost.
+Each step sends operation/target/payload Choices with shared `semantic_options`.
+Operation criteria list their currently compatible targets; target criteria list
+available operations. This grounds independent answers in the same next-step
+constraints without locally classifying the user's operation.
+Every answer requires known IDs, exact probability keys, finite [0,1] values,
+total within 0.01 of one, valid confidence, and a maximum-probability winner.
+Normalize accepted totals to one without changing factor confidence. Record raw
+total/count/normalization per factor, including factor-specific rejection details.
+Minimum factor confidence drives approval; independent factors are not a joint
+probability. Incompatible choices reject the whole decision without fallback effects.
 
-## Data and failure handling
+OPEN_APP/FOCUS_APP retain their one-action behavior. Explicit
+OPEN_APP_FOR_TEXT/FOCUS_APP_FOR_TEXT request activation followed by fresh editor
+observation; FOCUS_FIELD requests one native focus effect followed by another Jev
+choice. Typing prerequisites may carry an exact payload span without inserting
+it, or explicitly choose none. A carried span is bound to the preparation sequence
+and cannot change before insertion. TYPE_TEXT requires a focused field with a
+readable value and valid UTF-16 selection plus an exact span. App-level TYPE_TEXT
+can be described semantically but has no executable target. SEARCH/CREATE_NOTE/
+RUN_COMMAND remain unsupported. No executor submits commands or presses Return.
 
-Jev receives the goal, a compact active-app/Accessibility-readiness summary, and the candidate menu. It does not receive native AX element handles or arbitrary app contents. The key is parsed as data from `.env` (or taken from the environment); it is not included in reports. Reports are local JSON artifacts and do contain the user's goal text.
+There are at most four steps per run. Each prerequisite must verify before the
+next request; previous verified operations are provided to Jev. A completed
+insertion terminates the run immediately, preventing a second insertion. STOP
+after preparation reports incomplete, and exhausted preparation is incomplete.
+Completed preparation effects are never undone. Ordinary app activation does not
+finish a pending typing sequence. This is bounded typing preparation, not a general
+multi-command or Notes-creation workflow controller.
 
-The report distinguishes outcomes such as blocked, unsupported, stopped, rejected, dry-run, failed, unverified, and completed. Once an OS effect is dispatched, cancellation cannot undo it; if verification is uncertain, the action is not replayed. Offline end-to-end tests inject fake Jev and desktop boundaries, so passing tests do not prove live provider access, macOS permissions, or real activation.
+## Native text boundary
 
-## Intended direction, not current behavior
+AX discovery retains a deeply focused editor first, then traverses at most 256
+nodes / 32 editable fields with a two-second scan budget in the focused window.
+Container traversal is depth-first; table/list/outline/browser/collection children
+are deferred behind sibling editor panes. Prefer AXVisibleChildren in collections
+and scroll areas, falling back to AXChildren when unsupported. Each pending queue
+is capped at 256 handles. Inspect a directly focused text role first; a focused
+sidebar row/table does not bring its subtree ahead of the window's document pane.
+Do not descend into paragraph/attachment children of text fields. AXIdentifier is
+a bounded label fallback, allowing Jev to distinguish Note Body Text View from search.
+Secure/password roles and
+protected ancestors are rejected before reading values. Disabled and read-only
+fields are excluded. Native CFEqual identity maps adjacent snapshots; fresh handles
+alone execute. Available AXWindow identity must match the observed focused window.
+Only the focused editor retains existing document value/selection locally; values
+above 65,536 Python characters or missing/invalid selections prevent insertion.
 
-The long-term goal is voice-powered control of the full desktop through Jev: transcribe speech, understand the requested operation, select a real observed target and exact payload, execute grounded actions, and verify outcomes. Development is intended to proceed through reliable semantic decisions and bounded desktop perception, then tested app controls and multi-step workflows, before adding voice, a bounded queue, and potentially early execution of stable low-risk commands while speech continues.
+Immediately before effects, compare app PID, window/element identity, role/label,
+write capabilities, focus, exact value and selection. Repeat after approval and
+once more in the native executor. Caret offsets count UTF-16 units, not Python
+code points. Split-surrogate selections are rejected. Replacement touches only the
+selection via writable AXSelectedText; AXValue is never rewritten wholesale.
+If that attribute is not writable, use preflighted paired Quartz Unicode events,
+20 UTF-16 units per batch without splitting surrogate pairs. Guard foreground PID
+and focused native identity between batches without copying document text. Events
+are addressed to the selected PID with zero modifiers. No clipboard or Return/Tab
+key is used. A failed setter never falls back to keyboard events.
 
-Those capabilities are not present in `app/` today. Future work must keep executable actions locally grounded, revalidate live targets before effects, apply safety independently of Jev, distinguish typing from submission, and verify results rather than treating dispatch as success. See the README's **In development** section for the concise user-facing roadmap.
+Multiline text is supported through AXSelectedText on AXTextArea. Single-line fields
+and keyboard fallback reject control/multiline characters. Terminal is type-only:
+require the focused AXTextArea caret at the exact buffer end with no selection;
+reject control characters and Unicode line separators through either dispatch path.
+Fields without a verifiable baseline remain unsupported rather than guessed.
+
+Verification requires the complete expected value on the same editor/window and
+the collapsed caret at selection start + inserted UTF-16 length. This also handles
+replacement with identical text. Substring presence is never sufficient. Partial,
+failed, or unverified insertions are not retried; reports distinguish dispatch
+that never started from uncertain/partial effects.
+
+## Data, reports, and evidence
+
+Reported failure cases to reproduce: a valid Notes activation followed by a
+probability-total rejection must retain the failing factor and raw total; rounding
+within 0.01 may normalize without changing confidence, larger errors must reject.
+An active Notes window with no field targets must report discovery/readiness
+counts so missing editors can be distinguished from missing text/caret/write support.
+
+Provider state contains the goal, compact app/readiness facts, bounded field labels
+(up to 240 characters), roles/focus/capabilities, span proposals, and prior verified
+operation names. Existing AX document values, selected text, and native handles
+stay local. Labels may themselves contain app-provided text. Schema-3 reports
+contain semantic decisions, exact dictated payloads, per-factor metadata, step
+outcomes, aggregate timings, and completion scope. `single_insertion` verifies
+one insertion; `selected_action` verifies an ordinary app activation. Neither
+claims arbitrary multi-command goal completion. Review reports before sharing.
+Rejected combinations include validated choice IDs, factor confidences and
+distributions under `rejected_decision`, without raw provider bodies.
+`editor_readiness` reports focused-window AX error, field/insertion counts,
+excluded/unready field reasons, traversal/deferred collection counts, dropped
+pending handles and limits, without document text or labels. The observed Notes
+failure had a verified app preparation, then no field targets and an unsupported
+application-level TYPE_TEXT; no text was sent. The latest saved report reached
+exactly 256 visited nodes with scan_limit_reached=true and no excluded text fields.
+Read-only native inspection confirmed a writable Note Body Text View beside the
+broad note table. Breadth-first traversal could exhaust its budget in list rows
+before reaching a nested body; deferred collection traversal fixes this case.
+Regression scenarios cover 170-note trees, both pane orders, visible-children
+support or absence, and focus on row/table/window/body. Native Python insertion
+remains unverified on this tool host; native UI inspection alone does not prove it.
+
+Confidence below 0.65 requires approval. `--yes` approves low-confidence native
+app/focus/typing actions only; it does not bypass blocks or fresh validation.
+Sensitive goal wording is blocked before Jev. `--dry-run` still sends bounded
+state to TypeSafe but stops before the first effect, including preparation.
+
+Offline production-pipeline checks leave `.build/python-e2e.json` and
+`.build/typing-e2e.json`. The typing checks fake only Jev and native API boundaries,
+exercising production discovery, semantics, safety, dispatch, and verification.
+`python -m scripts.test_typing_native` uses a disposable TextEdit fixture with
+scripted Jev; `--live-jev` additionally calls TypeSafe. Only its identified fixture
+may receive an effect. It writes `.build/typing-native.json` and fails, rather than
+skips, on missing permissions/readiness. This development Python host currently
+has no AX permission: native insertion remains unverified. User-run reports show
+their CLI host has permission; permission attribution differs between hosts.
+
+## Remaining roadmap
+
+Prove real app/editor compatibility after granting native permissions. Notes
+creation, Finder search/open-result workflows, Terminal submission, general
+multi-step goals, speech, queues, and streaming remain future work.

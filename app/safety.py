@@ -24,6 +24,6 @@ def disposition(action: ActionCandidate, confidence: float) -> str:
 
     if action.kind == "STOP":
         return "deny"
-    if action.kind not in {"OPEN_APP", "FOCUS_APP"}:
+    if action.kind not in {"OPEN_APP", "FOCUS_APP", "FOCUS_FIELD", "TYPE_TEXT"}:
         return "deny"
     return "allow" if confidence >= 0.65 else "confirm"

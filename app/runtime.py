@@ -1,4 +1,4 @@
-"""Connect one text goal to observation, Jev, local safety, effect, and verification."""
+"""Connect semantic choices to bounded app/field preparation and one verified insertion."""
 
 from __future__ import annotations
 
@@ -8,11 +8,14 @@ from typing import Callable
 from .decision import JevCallError, select_action
 from .config import ConfigurationError, load_api_key
 from .models import ActionCandidate
-
 from .desktop import DesktopError, DesktopState
 from .safety import blocked_goal, disposition
-from .verification import verify_app
+from .verification import verify_action
 from .semantics import SemanticError
+from .text_input import TextInputError
+
+
+MAX_STEPS = 4
 
 
 def run_goal(
@@ -24,24 +27,22 @@ def run_goal(
     approve: Callable[[ActionCandidate], bool] = lambda _: False,
     client: object | None = None,
 ) -> dict[str, object]:
-    """Run one bounded decision and return a compact, serializable audit record."""
+    """Let Jev select each prerequisite; never repeat a sent or uncertain insertion."""
 
-    report: dict[str, object] = {
-        "schema_version": 2,
-        "goal": goal,
-        "outcome": "failed",
-        "effect_sent": False,
-        "verified": False,
-        "completion_scope": "selected_action",
-        "timings_ms": {},
+    report = {
+        "schema_version": 3, "goal": goal, "outcome": "failed",
+        "effect_sent": False, "verified": False,
+        "completion_scope": "selected_action", "timings_ms": {}, "steps": [],
     }
-    started = perf_counter()
-    stage = started
+    started = stage = perf_counter()
+    pending_payload_id = None
 
     def timing(name: str) -> None:
+        """Accumulate phase costs across the bounded preparation sequence."""
+
         nonlocal stage
         now = perf_counter()
-        report["timings_ms"][name] = round((now - stage) * 1_000)
+        report["timings_ms"][name] = report["timings_ms"].get(name, 0) + round((now - stage) * 1_000)
         stage = now
 
     try:
@@ -52,73 +53,116 @@ def run_goal(
             report["reason"] = "This request is outside the local safety boundary."
             return report
 
-        before: DesktopState = desktop.snapshot()
-        menu = desktop.semantic_menu(goal, before)
-        report["observed_app"] = before.active.name if before.active else None
-        report["accessibility_trusted"] = before.ax_trusted
-        report["target_ids"] = list(menu.targets)
-        report["payload_ids"] = list(menu.payloads)
-        timing("observation")
-
-        decision = select_action(
-            goal,
-            before.provider_state(),
-            menu,
-            api_key=load_api_key() if client is None else None,
-            model=model,
-            client=client,
-        )
-        action = decision.selected_candidate
-        report["decision"] = decision.to_dict()
-        timing("jev")
-        if decision.semantic["operation"] == "STOP":
-            report["outcome"] = "stopped"
-            report["reason"] = "Jev selected STOP; no desktop effect was sent."
-            return report
-        if action is None:
-            report["outcome"] = "unsupported"
-            report["reason"] = "The selected operation has no native executor yet; no effect was sent."
-            return report
-
-        def validate_target() -> None:
-            """Bind both decision and approval to the same live app facts."""
-
-            fresh: DesktopState = desktop.snapshot()
-            if fresh.active != before.active or fresh.active is None:
-                raise DesktopError("The foreground app changed while deciding or approving.")
-            target_id = decision.semantic["target_id"]
-            fresh_target = desktop.semantic_menu(goal, fresh).targets.get(target_id)
-            if fresh_target != decision.semantic["target"]:
-                raise DesktopError("The selected application is no longer a current action.")
-
-        validate_target()
-        timing("fresh_target")
-
-        policy = disposition(action, decision.confidence)
-        report["safety"] = policy
-        if policy == "deny":
-            report["outcome"] = "blocked"
-            return report
-        if dry_run:
-            report["outcome"] = "dry_run"
-            return report
-        if policy == "confirm":
-            if not approve(action):
-                report["outcome"] = "rejected"
+        for index in range(MAX_STEPS):
+            report["verified"] = False
+            before: DesktopState = desktop.snapshot()
+            menu = desktop.semantic_menu(goal, before)
+            report["observed_app"] = before.active.name if before.active else None
+            report["accessibility_trusted"] = before.ax_trusted
+            report["editor_readiness"] = {
+                "focused_window_available": before.focused_window_available,
+                "field_count": len(before.text_fields),
+                "can_type_count": sum(item.can_type for item in before.text_fields),
+                **before.editor_diagnostics,
+            }
+            report["target_ids"], report["payload_ids"] = list(menu.targets), list(menu.payloads)
+            timing("observation")
+            state = before.provider_state()
+            # Prior verified operations help Jev advance rather than repeat preparation.
+            state["verified_steps"] = [item["decision"]["semantic"]["operation"] for item in report["steps"] if item["verified"]]
+            state["pending_payload_id"] = pending_payload_id
+            decision = select_action(
+                goal, state, menu, api_key=load_api_key() if client is None else None,
+                model=model, client=client,
+            )
+            action = decision.selected_candidate
+            report["decision"] = decision.to_dict()
+            step = {"index": index + 1, "decision": decision.to_dict(), "effect_sent": False, "verified": False}
+            report["steps"].append(step)
+            timing("jev")
+            payload_id = decision.semantic["payload_id"]
+            if pending_payload_id is not None and payload_id not in {"none", pending_payload_id}:
+                raise SemanticError("Jev changed the prepared typing payload; no further effect was sent.")
+            if decision.semantic["operation"] == "STOP":
+                report["outcome"] = "incomplete" if index else "stopped"
+                report["reason"] = "Jev selected STOP before typing was completed; no further effect was sent."
                 return report
-            validate_target()
-            timing("approval")
+            if action is None:
+                report["outcome"] = "unsupported"
+                report["reason"] = "No executable grounded target is available for the selected operation."
+                if decision.semantic["operation"] == "TYPE_TEXT":
+                    if not before.ax_trusted:
+                        report["reason"] = "Typing requires macOS Accessibility permission for this Python host."
+                    elif not before.text_fields:
+                        name = before.active.name if before.active else "the active app"
+                        report["reason"] = (
+                            f"No editable field was discovered in {name}; TYPE_TEXT needs a field target. "
+                            "Open an existing editable document and focus its body. "
+                            "See editor_readiness for discovery failures; document creation is not implemented."
+                        )
+                    else:
+                        report["reason"] = "TYPE_TEXT selected an application target; insertion requires an observed field target."
+                return report
+            if action.parameters.get("continue_typing") and not before.ax_trusted:
+                raise TextInputError("Typing preparation requires macOS Accessibility permission.")
+            if index and action.kind in {"OPEN_APP", "FOCUS_APP"} and not action.parameters.get("continue_typing"):
+                raise DesktopError("A typing preparation sequence cannot finish with an ordinary app activation.")
+            if (action.kind == "FOCUS_FIELD" or action.parameters.get("continue_typing")) and payload_id != "none":
+                pending_payload_id = payload_id
 
-        # Once dispatch begins, a timeout may still mean the OS received the effect.
-        report["effect_sent"] = True
-        desktop.execute(action)
-        timing("execution")
-        report["verified"] = verify_app(desktop, action)
-        timing("verification")
-        report["outcome"] = "completed" if report["verified"] else "unverified"
-        if not report["verified"]:
-            report["reason"] = "The app did not become frontmost; the effect was not retried."
-    except (DesktopError, JevCallError, ConfigurationError, SemanticError) as error:
+            def validate_target() -> DesktopState:
+                """Bind decision and approval to the same live application/editor facts."""
+
+                fresh = desktop.snapshot()
+                desktop.validate_action(action, before, fresh)
+                target_id = decision.semantic["target_id"]
+                if desktop.semantic_menu(goal, fresh).targets.get(target_id) != decision.semantic["target"]:
+                    raise DesktopError("The selected target is no longer a current action.")
+                return fresh
+
+            fresh = validate_target()
+            timing("fresh_target")
+            policy = disposition(action, decision.confidence)
+            report["safety"] = policy
+            if policy == "deny":
+                report["outcome"] = "blocked"
+                return report
+            if dry_run:
+                report["outcome"] = "dry_run"
+                return report
+            if policy == "confirm":
+                if not approve(action):
+                    report["outcome"] = "rejected"
+                    return report
+                fresh = validate_target()
+                timing("approval")
+
+            # Dispatch failure can still mean a partial effect. Never replay it.
+            report["effect_sent"] = step["effect_sent"] = True
+            report["verified"] = False
+            desktop.execute(action)
+            timing("execution")
+            verified = verify_action(desktop, action, fresh)
+            report["verified"] = step["verified"] = verified
+            timing("verification")
+            if not verified:
+                report["outcome"] = "unverified"
+                report["reason"] = "The exact intended effect was not observed; it was not retried."
+                return report
+            if action.kind == "FOCUS_FIELD" or action.parameters.get("continue_typing"):
+                continue
+            report["outcome"] = "completed"
+            if action.kind == "TYPE_TEXT":
+                report["completion_scope"] = "single_insertion"
+            return report
+        report["outcome"] = "incomplete"
+        report["reason"] = "The four-step typing preparation limit was reached; completed effects remain."
+    except (DesktopError, JevCallError, ConfigurationError, SemanticError, TextInputError) as error:
+        if isinstance(error, JevCallError) and error.rejected_decision is not None:
+            report["rejected_decision"] = error.rejected_decision
+        if isinstance(error, TextInputError) and report["steps"]:
+            report["steps"][-1]["effect_sent"] = error.effect_sent
+            report["effect_sent"] = any(item["effect_sent"] for item in report["steps"])
         report["reason"] = str(error)
     except KeyboardInterrupt:
         report["outcome"] = "cancelled"

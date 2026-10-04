@@ -1,4 +1,4 @@
-"""Expose factorized semantic decisions and bounded app effects through a CLI."""
+"""Expose semantic choices and bounded app/focus/typing effects through a CLI."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("goal", nargs="*", help="Text goal, such as 'switch to Finder'.")
     parser.add_argument("--model", default="jev-latest")
     parser.add_argument("--dry-run", action="store_true", help="Choose without executing.")
-    parser.add_argument("--yes", action="store_true", help="Approve low-confidence app actions.")
+    parser.add_argument("--yes", action="store_true", help="Approve low-confidence app/focus/typing actions.")
     parser.add_argument("--request-accessibility", action="store_true", help="Ask macOS for Accessibility access for this CLI host.")
     parser.add_argument("--report", type=Path, default=Path(".build/python-cli-last.json"))
     return parser
@@ -64,6 +64,9 @@ def main(
             return True
         if not sys.stdin.isatty():
             return False
+        if action.kind == "TYPE_TEXT":
+            # Show the exact locally resolved payload before low-confidence approval.
+            print(f"Text: {action.parameters['text']!r}")
         return input(f"Approve {action.description} [y/N] ").strip().casefold() == "y"
 
     try:
@@ -76,7 +79,7 @@ def main(
             client=client,
         )
     except KeyboardInterrupt:
-        report = {"schema_version": 2, "goal": goal, "outcome": "cancelled", "reason": "Interrupted; an already sent effect cannot be undone."}
+        report = {"schema_version": 3, "goal": goal, "outcome": "cancelled", "reason": "Interrupted; an already sent effect cannot be undone."}
     _save_report(args.report, report)
     print(json.dumps(report, indent=2, sort_keys=True), file=output)
     return 0 if report["outcome"] in {"completed", "dry_run"} else 1

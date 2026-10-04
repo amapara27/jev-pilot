@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
@@ -39,6 +39,7 @@ class JevDecision:
     input_tokens: int | None
     output_tokens: int | None
     latency_milliseconds: int
+    probability_validation: dict[str, dict[str, JSONValue]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stable machine-readable decision payload."""
@@ -48,6 +49,7 @@ class JevDecision:
             "semantic": self.semantic,
             "probabilities": self.probabilities,
             "factor_confidences": self.factor_confidences,
+            "probability_validation": self.probability_validation,
             "confidence": self.confidence,
             "model": self.model,
             "request_id": self.request_id,

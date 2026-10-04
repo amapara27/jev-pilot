@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import monotonic
 
-import ApplicationServices as AX
 from AppKit import NSWorkspace, NSWorkspaceOpenConfiguration
 from Foundation import NSDate, NSRunLoop
 
 from .models import ActionCandidate
 from .semantics import SemanticMenu, extract_payloads
+from .text_input import NativeText, TextField, TextInputError
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,8 @@ class DesktopState:
     running: tuple[AppState, ...]
     ax_trusted: bool
     focused_window_available: bool
+    text_fields: tuple[TextField, ...] = ()
+    editor_diagnostics: dict[str, object] = field(default_factory=dict)
 
     def provider_state(self) -> dict[str, object]:
         """Send only the active app; candidates already describe named targets."""
@@ -54,6 +56,7 @@ SUPPORTED_APPS = (
     ("Google Chrome", "com.google.Chrome", ("chrome", "google chrome")),
     ("System Settings", "com.apple.systempreferences", ("settings", "system settings")),
     ("Notes", "com.apple.Notes", ("notes",)),
+    ("TextEdit", "com.apple.TextEdit", ("textedit", "text edit")),
 )
 
 
@@ -62,13 +65,14 @@ class DesktopError(RuntimeError):
 
 
 class MacDesktop:
-    """Uses AppKit for app effects and AX for readiness without reading user content."""
+    """Ground AX editors locally and execute only fresh, validated app/text effects."""
 
-    def __init__(self) -> None:
-        self.workspace = NSWorkspace.sharedWorkspace()
+    def __init__(self, *, workspace=None, text=None) -> None:
+        self.workspace = workspace if workspace is not None else NSWorkspace.sharedWorkspace()
+        self.text = text if text is not None else NativeText()
 
     def snapshot(self) -> DesktopState:
-        """Observe the foreground app, running apps, and focused-window availability."""
+        """Observe native app/window facts and bounded, locally retained AX editors."""
 
         frontmost = self.workspace.frontmostApplication()
         if frontmost is None:
@@ -80,22 +84,33 @@ class MacDesktop:
                 key=lambda app: (app.name.casefold(), app.pid),
             )
         )
-        trusted = bool(AX.AXIsProcessTrusted())
+        ax = self.text.ax
+        trusted = bool(ax.AXIsProcessTrusted())
         focused = False
+        fields = ()
+        diagnostics = {}
         if trusted:
-            application = AX.AXUIElementCreateApplication(active.pid)
-            error, window = AX.AXUIElementCopyAttributeValue(
-                application, AX.kAXFocusedWindowAttribute, None
-            )
-            focused = error == AX.kAXErrorSuccess and window is not None
-        return DesktopState(active, running, trusted, focused)
+            application = ax.AXUIElementCreateApplication(active.pid)
+            ax.AXUIElementSetMessagingTimeout(application, 0.2)
+            error, window = ax.AXUIElementCopyAttributeValue(application, "AXFocusedWindow", None)
+            diagnostics["focused_window_ax_error"] = int(error)
+            if error != 0:
+                window = None
+            focused = window is not None
+            if focused:
+                fields = self.text.scan(active.pid, active.bundle_id, application, window)
+                diagnostics.update(self.text.diagnostics)
+        return DesktopState(active, running, trusted, focused, fields, diagnostics)
 
     def semantic_menu(self, goal: str, state: DesktopState) -> SemanticMenu:
         """Ground all supported installed apps without locally classifying the goal."""
 
         payloads = extract_payloads(goal)
         targets = {"none": {"description": "No grounded target."}}
-        for name, bundle_id, aliases in SUPPORTED_APPS:
+        catalog = list(SUPPORTED_APPS)
+        if state.active and state.active.bundle_id not in {item[1] for item in catalog}:
+            catalog.append((state.active.name, state.active.bundle_id, (state.active.name.casefold(),)))
+        for name, bundle_id, aliases in catalog:
             if self.workspace.URLForApplicationWithBundleIdentifier_(bundle_id) is None:
                 continue
             targets[bundle_id] = {
@@ -103,13 +118,50 @@ class MacDesktop:
                 "running": any(app.bundle_id == bundle_id for app in state.running),
                 "active": bool(state.active and state.active.bundle_id == bundle_id),
                 "process_identifiers": sorted(app.pid for app in state.running if app.bundle_id == bundle_id),
-                "scope": "Application only; no editable field or control is grounded yet.",
+                "scope": "application",
             }
+        for item in state.text_fields:
+            targets[item.id] = item.provider_target()
         return SemanticMenu(goal, targets, payloads)
 
-    def execute(self, action: ActionCandidate) -> None:
-        """Request one AppKit activation and wait for its native completion callback."""
+    def validate_action(self, action: ActionCandidate, before: DesktopState, fresh: DesktopState) -> None:
+        """Bind a typing/focus effect to exact local AX identity and current text facts."""
 
+        if before.active != fresh.active or fresh.active is None:
+            raise DesktopError("The foreground app changed while deciding or approving.")
+        if action.kind in {"TYPE_TEXT", "FOCUS_FIELD"}:
+            identifier = action.parameters["element_id"]
+            original = next((item for item in before.text_fields if item.id == identifier), None)
+            current = next((item for item in fresh.text_fields if item.id == identifier), None)
+            if not fresh.ax_trusted or not original or not current or not self.text.same_target(original, current, typing=action.kind == "TYPE_TEXT"):
+                raise TextInputError("The editor, window, text, or caret changed; no text was sent.")
+            self.validated_state = fresh
+
+    def execute(self, action: ActionCandidate) -> None:
+        """Dispatch a native app, field focus, or insertion effect without replay."""
+
+        if action.kind in {"TYPE_TEXT", "FOCUS_FIELD"}:
+            fresh = self.snapshot()
+            self.validate_action(action, self.validated_state, fresh)
+            target = next(item for item in fresh.text_fields if item.id == action.parameters["element_id"])
+
+            def guard() -> bool:
+                """Recheck PID/focus without copying existing document text per event."""
+
+                frontmost = self.workspace.frontmostApplication()
+                if frontmost is None or int(frontmost.processIdentifier()) != target.pid:
+                    return False
+                if action.kind == "FOCUS_FIELD":
+                    return True
+                application = self.text.ax.AXUIElementCreateApplication(target.pid)
+                focused = self.text.read(application, "AXFocusedUIElement")
+                return focused is not None and bool(self.text.equal(focused, target.element))
+
+            if action.kind == "FOCUS_FIELD":
+                self.text.focus(target, guard)
+            else:
+                self.text.insert(target, action.parameters["text"], guard)
+            return
         if action.kind not in {"OPEN_APP", "FOCUS_APP"}:
             raise DesktopError("This operation has no native executor yet.")
         bundle_id = action.parameters.get("bundle_identifier")

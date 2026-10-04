@@ -12,7 +12,10 @@ from .models import ActionCandidate, JSONValue
 OPERATIONS = {
     "OPEN_APP": "Open a grounded installed app that is not running; no payload.",
     "FOCUS_APP": "Focus a running app that is not frontmost; no payload.",
-    "TYPE_TEXT": "Insert exact text without submission; choose an app and a text span. Not executable yet.",
+    "OPEN_APP_FOR_TEXT": "Typing prerequisite: open a nonrunning app, then observe editors. Carry the intended text span (or none); do not insert yet.",
+    "FOCUS_APP_FOR_TEXT": "Typing prerequisite: focus a running background app, then observe editors. Carry the intended text span (or none); do not insert yet.",
+    "FOCUS_FIELD": "Typing prerequisite: focus an observed focusable editable field that is not focused. Carry the intended span (or none); do not insert yet.",
+    "TYPE_TEXT": "Insert an exact text span into a focused field with can_type=true, without submission. App-level targets cannot execute insertion.",
     "SEARCH": "Search within a grounded app for an exact text span. Not executable yet.",
     "CREATE_NOTE": "Create a new note in Notes; no payload. Not executable yet.",
     "RUN_COMMAND": "Explicitly submit a command in Terminal, distinct from typing. Not executable yet.",
@@ -43,9 +46,17 @@ class SemanticMenu:
         target, payload = self.targets[target_id], self.payloads[payload_id]
         if operation in {"STOP", "UNSUPPORTED"}:
             valid = target_id == payload_id == "none"
-        elif operation in {"OPEN_APP", "FOCUS_APP"}:
-            valid = target_id != "none" and payload_id == "none" and not target["active"]
-            valid = valid and bool(target["running"]) == (operation == "FOCUS_APP")
+        elif operation in {"OPEN_APP", "FOCUS_APP", "OPEN_APP_FOR_TEXT", "FOCUS_APP_FOR_TEXT"}:
+            valid = target.get("scope") == "application" and not target["active"]
+            valid = valid and (operation.endswith("_FOR_TEXT") or payload_id == "none")
+            valid = valid and bool(target["running"]) == operation.startswith("FOCUS_APP")
+        elif operation == "FOCUS_FIELD":
+            valid = target.get("scope") == "field"
+            valid = valid and target["focusable"] and not target["focused"]
+        elif operation == "TYPE_TEXT":
+            valid = target_id != "none" and payload_id != "none"
+            if target.get("scope") == "field":
+                valid = valid and target["can_type"]
         elif operation == "CREATE_NOTE":
             valid = target_id == "com.apple.Notes" and payload_id == "none"
         else:
@@ -53,7 +64,10 @@ class SemanticMenu:
             if operation == "RUN_COMMAND":
                 valid = valid and target_id == "com.apple.Terminal"
         if not valid:
-            raise SemanticError("Jev selected incompatible operation, target, and payload choices.")
+            raise SemanticError(
+                "Jev selected incompatible operation, target, and payload choices: "
+                f"operation={operation}, target={target_id}, payload={payload_id}."
+            )
 
         semantic = {
             "operation": operation,
@@ -63,14 +77,48 @@ class SemanticMenu:
             "payload": payload,
         }
         action = None
-        if operation in {"OPEN_APP", "FOCUS_APP"}:
+        if operation in {"OPEN_APP", "FOCUS_APP", "OPEN_APP_FOR_TEXT", "FOCUS_APP_FOR_TEXT"}:
+            kind = "FOCUS_APP" if operation.startswith("FOCUS_APP") else "OPEN_APP"
+            parameters = {"bundle_identifier": target_id, "name": target["name"]}
+            if operation.endswith("_FOR_TEXT"):
+                parameters["continue_typing"] = True
             action = ActionCandidate(
                 id=f"{operation}:{target_id}",
-                kind=operation,
-                parameters={"bundle_identifier": target_id, "name": target["name"]},
-                description=f"{'Open' if operation == 'OPEN_APP' else 'Focus'} {target['name']}.",
+                kind=kind,
+                parameters=parameters,
+                description=f"{'Open' if kind == 'OPEN_APP' else 'Focus'} {target['name']}.",
+            )
+        elif operation in {"TYPE_TEXT", "FOCUS_FIELD"} and target.get("scope") == "field":
+            parameters = {
+                "element_id": target_id, "bundle_identifier": target["bundle_identifier"],
+                "process_identifier": target["process_identifier"],
+            }
+            if operation == "TYPE_TEXT":
+                parameters["text"] = payload["text"]
+            action = ActionCandidate(
+                id=f"{operation}:{target_id}", kind=operation, parameters=parameters,
+                description=f"{'Type exact text into' if operation == 'TYPE_TEXT' else 'Focus'} {target['label']}.",
             )
         return semantic, action
+
+    def operation_criteria(self) -> dict[str, dict[str, JSONValue]]:
+        """Keep all intents visible while identifying targets valid for the current step."""
+
+        span = next((key for key in self.payloads if key != "none"), "none")
+        criteria = {}
+        for operation, description in OPERATIONS.items():
+            payload = span if operation in {"TYPE_TEXT", "SEARCH", "RUN_COMMAND"} else "none"
+            targets = []
+            for identifier in self.targets:
+                try:
+                    _, action = self.resolve(operation, identifier, payload)
+                except SemanticError:
+                    continue
+                # App-level typing is describable but is never an executable next step.
+                if operation != "TYPE_TEXT" or action is not None:
+                    targets.append(identifier)
+            criteria[operation] = {"description": description, "available_targets": targets}
+        return criteria
 
 
 def extract_payloads(goal: str) -> dict[str, dict[str, JSONValue]]:
