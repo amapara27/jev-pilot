@@ -64,7 +64,7 @@ Use an installed app name. Run `python -m app --help` to see all options. `--yes
 
 The command prints a schema-version-3 JSON result and saves it to `.build/python-cli-last.json` by default. It includes semantic decisions, exact payload offsets, per-factor distributions, preparation steps, and verification. The lowest factor confidence drives approval. Reports contain your goal/payload and bounded app/field metadata, but no existing document values or native handles. Review them before sharing. Choose another destination with `--report .build/my-run.json`.
 
-If an app opens without typing, inspect the individual steps: opening can set the overall `effect_sent` to true even when the typing step sends nothing. `TYPE_TEXT` needs a `field_*` target; an application target such as `com.apple.Notes` cannot insert text. `editor_readiness` gives discovery counts and exclusion reasons. Discovery prioritizes editor panes over broad note lists within its bounded scan. Notes requires an existing unlocked note; automatic note creation is not implemented. Probability rejections include the failing factor and raw total under `rejected_decision`.
+If an app opens without typing, inspect the individual steps: opening can set the overall `effect_sent` to true even when the typing step sends nothing. `TYPE_TEXT` needs a `field_*` target; an application target such as `com.apple.Notes` cannot insert text. If Jev selects the active app despite usable observed fields, a `reselect_field` step sends no effect and asks Jev again using only that app’s fields. This consumes one of the four steps; an unfocused editor still requires `FOCUS_FIELD` before insertion. `editor_readiness` gives discovery counts and exclusion reasons. Discovery prioritizes editor panes over broad note lists within its bounded scan. Notes requires an existing unlocked note; automatic note creation is not implemented. Probability rejections include the failing factor and raw total under `rejected_decision`.
 
 After granting Accessibility, open a disposable TextEdit document and try:
 
@@ -109,6 +109,25 @@ Run native acceptance with a disposable labeled TextEdit document:
 python -m scripts.test_typing_native
 ```
 
-This uses scripted choices with the real native executor and writes `.build/typing-native.json`. Add `--live-jev` to also send the fixture goal and bounded target metadata to TypeSafe. Missing permission or readiness is a failure, not a skipped test. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+This creates a disposable document, restores your starting app, and runs `open TextEdit and type ...` through the production CLI with scripted choices and real native effects. Success requires verified activation and exact insertion (`workflow_verified=true`); it does not assume a focused editor before running the command. It writes `.build/typing-native.json`. Add `--live-jev` to use TypeSafe choices. Missing permission or readiness is a failure, not a skipped test. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 The previous Swift app is retired. Any retained Swift source is reference material, not a dependency of the Python CLI.
+
+To diagnose discovery from your permitted terminal without activating an app,
+typing, or calling Jev, keep the affected document open and run:
+
+```sh
+python -m scripts.test_typing_native --inspect Notes
+python -m scripts.test_typing_native --inspect TextEdit
+```
+
+These print capability/error facts and omit document contents and field labels.
+`text_field_checks` distinguishes a disabled field, invalid native Boolean, and
+an AXEnabled read error; `ancestry_rejections` identifies protected/failed ancestry.
+Offline test success does not verify native editor compatibility.
+
+Notes can omit `AXEnabled` on its focused document body (`-25205`, attribute
+unsupported). The scanner uses positive native write support for that specific
+case, while still rejecting explicit disabled values and other read errors.
+A focused body with this error was the confirmed cause of the reported Notes
+field exclusion; a scan-limit flag did not mean that body was never reached.

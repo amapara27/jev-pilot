@@ -20,6 +20,12 @@ TEXT_ROLES = {"AXTextField", "AXTextArea", "AXComboBox"}
 COLLECTION_ROLES = {"AXTable", "AXOutline", "AXList", "AXBrowser", "AXCollection"}
 
 
+def native_true(value: object) -> bool:
+    """Accept native Boolean true without requiring Python singleton identity."""
+
+    return isinstance(value, (bool, int)) and value == 1
+
+
 class TextInputError(RuntimeError):
     """Display a local typing failure without exposing document contents."""
 
@@ -147,18 +153,23 @@ class NativeText:
             subrole_error, raw_subrole = self.ax.AXUIElementCopyAttributeValue(current, "AXSubrole", None)
             absent = {AX.kAXErrorAttributeUnsupported, AX.kAXErrorNoValue}
             if role_error != 0 or subrole_error not in absent | {0}:
+                self.count_reason("ancestry_rejections", f"role_error_{role_error}_subrole_error_{subrole_error}")
                 return False
             role = str(raw_role or "").casefold()
             subrole = str(raw_subrole or "").casefold()
             if "secure" in role + subrole or "password" in role + subrole:
+                self.count_reason("ancestry_rejections", "secure_role")
                 return False
             protected_error, protected = self.ax.AXUIElementCopyAttributeValue(current, "AXProtectedContent", None)
             if protected_error not in absent | {0}:
+                self.count_reason("ancestry_rejections", f"protected_error_{protected_error}")
                 return False
             if protected is not None and bool(protected):
+                self.count_reason("ancestry_rejections", "protected_content")
                 return False
             parent_error, parent = self.ax.AXUIElementCopyAttributeValue(current, "AXParent", None)
             if parent_error not in absent | {0}:
+                self.count_reason("ancestry_rejections", f"parent_error_{parent_error}")
                 return False
             if parent is None:
                 return True
@@ -166,13 +177,22 @@ class NativeText:
         return False
 
     def inspect(self, element: object, pid: int, bundle_id: str, window: object, focused: object) -> TextField | None:
-        """Retain exact text only for the focused, enabled, nonsecure editor."""
+        """Retain focused text only after native availability and write checks."""
 
         role = self.read(element, "AXRole")
         if role not in TEXT_ROLES:
             return None
-        if self.read(element, "AXEnabled") is not True:
-            self.count_reason("excluded_text_fields", "disabled_or_missing_enabled")
+        is_focused = focused is not None and bool(self.equal(element, focused))
+        enabled_error, enabled = self.ax.AXUIElementCopyAttributeValue(element, "AXEnabled", None)
+        check = {"role": role, "focused": is_focused, "enabled_ax_error": int(enabled_error),
+                 "enabled_value_type": type(enabled).__name__, "enabled_true": native_true(enabled)}
+        checks = self.diagnostics.setdefault("text_field_checks", [])
+        if len(checks) < MAX_FIELDS:
+            checks.append(check)
+        enabled_unsupported = enabled_error == AX.kAXErrorAttributeUnsupported
+        if (enabled_error != 0 and not enabled_unsupported) or (enabled_error == 0 and not native_true(enabled)):
+            reason = f"enabled_error_{enabled_error}" if enabled_error else "disabled_or_invalid_enabled"
+            self.count_reason("excluded_text_fields", reason)
             return None
         if not self.safe_ancestry(element):
             return None
@@ -181,12 +201,17 @@ class NativeText:
             self.count_reason("excluded_text_fields", "different_window")
             return None
         writable = self.settable(element, "AXSelectedText")
-        keyboard = self.settable(element, "AXValue") or self.read(element, "AXEditable") is True
+        keyboard = self.settable(element, "AXValue") or native_true(self.read(element, "AXEditable"))
+        focusable = self.settable(element, "AXFocused")
+        check.update(focusable=focusable, selected_text_writable=writable, keyboard_writable=keyboard)
         terminal = bundle_id == "com.apple.Terminal" and role == "AXTextArea"
-        if not (writable or keyboard or terminal):
+        # Notes omits AXEnabled on its body. Only that specific unsupported
+        # attribute may defer to positive write support; false/errors still block.
+        # Terminal's special candidate allowance is not positive write evidence.
+        if not (writable or keyboard or (terminal and not enabled_unsupported)):
             self.count_reason("excluded_text_fields", "no_write_support")
             return None
-        is_focused = focused is not None and bool(self.equal(element, focused))
+        check["availability_check"] = "write_support" if enabled_unsupported else "enabled_attribute"
         value, selection = None, None
         if is_focused:
             observed = self.read(element, "AXValue")
@@ -220,7 +245,7 @@ class NativeText:
         labels = [self.read(element, name) for name in ("AXTitle", "AXDescription", "AXPlaceholderValue", "AXIdentifier")]
         label = next((item for item in labels if isinstance(item, str) and item), role)[:240]
         return TextField(identifier, pid, bundle_id, role, label, is_focused,
-                         self.settable(element, "AXFocused"), writable, keyboard or terminal,
+                         focusable, writable, keyboard or terminal,
                          value, selection, element, window)
 
     def scan(self, pid: int, bundle_id: str, application: object, window: object) -> tuple[TextField, ...]:

@@ -7,6 +7,7 @@ from hashlib import sha256
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -189,42 +190,89 @@ def setup(**kwargs):
 class TypingPipelineTests(unittest.TestCase):
     """Leave a JSON artifact proving exact outcomes and non-retry failure behavior."""
 
-    def test_read_only_editor_probe(self):
-        """Diagnose native exclusions without reading text, activating, or typing."""
+    def test_native_inspection_without_effects(self):
+        """Exercise named-app diagnostics while withholding document text/labels."""
 
-        from scripts.inspect_editors import inspect_editors
+        from scripts.test_typing_native import FixtureDesktop, main as native_main
 
-        cases = {}
-        for name in ("ready", "protected_attribute_error", "protected", "enabled_missing", "untrusted"):
-            desktop, ax, quartz, workspace = setup()
-            original_read = ax.AXUIElementCopyAttributeValue
-            if name == "protected_attribute_error":
-                ax.AXUIElementCopyAttributeValue = lambda node, attribute, unused: (
-                    (-25204, None) if node is ax.editor and attribute == "AXProtectedContent"
-                    else original_read(node, attribute, unused))
-            elif name == "protected":
-                ax.editor.attrs["AXProtectedContent"] = True
-            elif name == "enabled_missing":
-                ax.editor.attrs.pop("AXEnabled")
-            elif name == "untrusted":
+        for name in ("ready", "enabled_error", "protected_error", "untrusted"):
+            _, ax, quartz, workspace = setup(bundle="com.apple.Notes")
+            if name == "untrusted":
                 ax.trusted = False
-            report = inspect_editors(BUNDLE, desktop=desktop)
-            cases[name] = report
+            elif name in {"enabled_error", "protected_error"}:
+                attribute_name = "AXEnabled" if name == "enabled_error" else "AXProtectedContent"
+                original_read = ax.AXUIElementCopyAttributeValue
+                ax.AXUIElementCopyAttributeValue = lambda node, attribute, unused: (
+                    (-25204, None) if node is ax.editor and attribute == attribute_name
+                    else original_read(node, attribute, unused))
+            desktop = FixtureDesktop(workspace=workspace, text=NativeText(ax=ax, quartz=quartz, equal=lambda a, b: a is b))
+            output = io.StringIO()
+            status = native_main(["--inspect", "Notes"], desktop=desktop, output=output)
+            report = json.loads(output.getvalue())
+            self.assertEqual(status, 1 if name == "untrusted" else 0)
+            self.assertEqual(report["observed_app"], "Notes")
             self.assertEqual(ax.effects, [])
             self.assertEqual(quartz.events, [])
             self.assertEqual(workspace.activation_count, 0)
-            self.assertFalse(any(attribute in {"AXValue", "AXSelectedText", "AXSelectedTextRange"} for _, attribute in ax.reads))
-            self.assertNotIn("before ", json.dumps(report))
-            self.assertEqual(len(report.get("fields", [])), int(name == "ready"))
-            if name == "protected_attribute_error":
-                self.assertTrue(any("AXProtectedContent:error_-25204" in key for key in report["editor_readiness"]["ancestry_rejections"]))
-            elif name == "protected":
-                self.assertTrue(any("protected_content" in key for key in report["editor_readiness"]["ancestry_rejections"]))
-            elif name == "enabled_missing":
-                self.assertEqual(report["editor_readiness"]["excluded_text_fields"], {"enabled_error_-25205": 1})
-            elif name == "untrusted":
-                self.assertEqual(ax.reads, [])
-        artifact = Path(".build/editor-probe-e2e.json")
+            self.assertNotIn("before ", output.getvalue())
+            self.assertNotIn("Jev disposable document", output.getvalue())
+            if name == "enabled_error":
+                self.assertEqual(report["editor_readiness"]["text_field_checks"][0]["enabled_ax_error"], -25204)
+            elif name == "protected_error":
+                self.assertGreater(report["editor_readiness"]["ancestry_rejections"]["protected_error_-25204"], 0)
+
+    def test_native_acceptance_command_harness(self):
+        """Exercise the native test's CLI flow, faking only macOS boundaries."""
+
+        from scripts.test_typing_native import FixtureDesktop, main as native_main
+
+        cases = {}
+        for name in ("focused", "needs_focus", "enabled_unsupported", "disabled", "wrong_window"):
+            with tempfile.TemporaryDirectory() as directory:
+                _, ax, quartz, workspace = setup(focused=name != "needs_focus")
+                workspace.bundle = "com.apple.Safari"
+                desktop = FixtureDesktop(workspace=workspace, text=NativeText(ax=ax, quartz=quartz, equal=lambda a, b: a is b))
+
+                def native_open(arguments, **kwargs):
+                    if "-a" in arguments:
+                        document = Path(arguments[-1])
+                        ax.window.attrs.update(AXTitle=document.name, AXDocument=document.as_uri())
+                        ax.editor.attrs.update(AXValue=document.read_text(), AXSelectedTextRange=(0, 0))
+                        workspace.bundle = BUNDLE
+                        if name == "disabled":
+                            ax.editor.attrs["AXEnabled"] = False
+                        if name == "enabled_unsupported":
+                            ax.editor.attrs.pop("AXEnabled")
+                        if name == "wrong_window":
+                            ax.window.attrs["AXDocument"] = "file:///other-document.txt"
+                    else:
+                        workspace.bundle = arguments[-1]
+
+                output = io.StringIO()
+                artifact = Path(directory) / "native.json"
+                with patch("scripts.test_typing_native.subprocess.run", side_effect=native_open):
+                    status = native_main(["--report", str(artifact)], desktop=desktop, output=output)
+                report = json.loads(artifact.read_text())
+                cases[name] = {"outcome": report["outcome"], "verified": report["verified"],
+                               "workflow_verified": report.get("workflow_verified"),
+                               "operations": [step["decision"]["semantic"]["operation"] for step in report.get("steps", [])],
+                               "editor_readiness": report.get("editor_readiness")}
+                self.assertEqual(json.loads(output.getvalue()), report)
+                if name in {"focused", "needs_focus", "enabled_unsupported"}:
+                    self.assertEqual(status, 0)
+                    self.assertTrue(report["workflow_verified"])
+                    self.assertEqual(report["goal"], 'open TextEdit and type "Jev native Unicode check 🦊 café"')
+                    self.assertEqual(cases[name]["operations"][0], "OPEN_APP_FOR_TEXT")
+                    self.assertEqual(cases[name]["operations"][-1], "TYPE_TEXT")
+                    self.assertEqual(len(ax.effects), 2 if name == "needs_focus" else 1)
+                else:
+                    self.assertEqual(status, 1)
+                    self.assertFalse(report["verified"])
+                    self.assertEqual(ax.effects, [])
+                    self.assertEqual(quartz.events, [])
+                    if name == "disabled":
+                        self.assertEqual(report["editor_readiness"]["text_field_checks"][0]["enabled_true"], False)
+        artifact = Path(".build/native-harness-e2e.json")
         artifact.parent.mkdir(exist_ok=True)
         artifact.write_text(json.dumps(cases, indent=2) + "\n")
 
@@ -268,6 +316,61 @@ class TypingPipelineTests(unittest.TestCase):
                 self.assertEqual(len(result[1].effects), 1)
                 self.assertEqual(result[2].events, [])
                 self.assertEqual(report["completion_scope"], "single_insertion")
+
+            # Native attributes are bridged values, not necessarily the True
+            # singleton. Numeric Boolean true must not remove a writable editor.
+            for bundle in (BUNDLE, "com.apple.Notes"):
+                result = setup(bundle=bundle, selected_writable=False)
+                result[1].editor.attrs.update(AXEnabled=1, AXEditable=1)
+                result[1].editor.writable.discard("AXValue")
+                report = run(f"native_numeric_boolean_{bundle}", result)
+                self.assertEqual(report["outcome"], "completed")
+                self.assertEqual(result[1].editor.attrs["AXValue"], "before hello 🦊")
+
+            for name, enabled in (("false", False), ("zero", 0), ("string", "true"), ("invalid", 2)):
+                result = setup()
+                result[1].editor.attrs["AXEnabled"] = enabled
+                report = run(f"enabled_{name}", result)
+                self.assertEqual(report["outcome"], "failed")
+                self.assertEqual(result[1].effects, [])
+                self.assertNotIn((result[1].editor, "AXValue"), result[1].reads)
+
+            # Notes' focused body omits AXEnabled (-25205). Positive native write
+            # support can ground that editor; an unsupported flag is not false.
+            for bundle in (BUNDLE, "com.apple.Notes"):
+                for focused in (True, False):
+                    result = setup(bundle=bundle, focused=focused)
+                    result[1].editor.attrs.pop("AXEnabled")
+                    plan = [("TYPE_TEXT", "editor", "span_0")] if focused else [
+                        ("FOCUS_FIELD", "editor", "span_0"), ("TYPE_TEXT", "editor", "span_0")]
+                    report = run(f"unsupported_enabled_{bundle}_{focused}", result, client=Jev(plan=plan))
+                    self.assertEqual(report["outcome"], "completed")
+                    self.assertEqual(report["editor_readiness"]["field_count"], 1)
+                    self.assertEqual(result[1].editor.attrs["AXValue"], "before hello 🦊")
+
+            for name in ("read_only", "secure", "terminal_no_write"):
+                result = setup(bundle="com.apple.Terminal" if name == "terminal_no_write" else BUNDLE)
+                result[1].editor.attrs.pop("AXEnabled")
+                if name == "secure":
+                    result[1].editor.attrs["AXSubrole"] = "AXSecureTextField"
+                else:
+                    result[1].editor.writable.clear()
+                    result[1].editor.attrs["AXEditable"] = False
+                report = run(f"unsupported_enabled_{name}", result)
+                self.assertEqual(report["outcome"], "failed")
+                self.assertEqual(result[1].effects, [])
+                self.assertNotIn((result[1].editor, "AXValue"), result[1].reads)
+
+            for ax_error in (-25212, -25204, -25200):
+                result = setup()
+                original_read = result[1].AXUIElementCopyAttributeValue
+                result[1].AXUIElementCopyAttributeValue = lambda node, attribute, unused: (
+                    (ax_error, None) if node is result[1].editor and attribute == "AXEnabled"
+                    else original_read(node, attribute, unused))
+                report = run(f"enabled_ax_error_{ax_error}", result)
+                self.assertEqual(report["outcome"], "failed")
+                self.assertEqual(report["editor_readiness"]["excluded_text_fields"], {f"enabled_error_{ax_error}": 1})
+                self.assertEqual(result[1].effects, [])
 
             keyboard = setup(selected_writable=False)
             payload = "界" * 19 + "🦊é" * 12
@@ -334,6 +437,75 @@ class TypingPipelineTests(unittest.TestCase):
             self.assertEqual(report["outcome"], "completed")
             self.assertEqual(opening[3].activation_count, 1)
             self.assertEqual(len(opening[1].effects), 1)
+
+            # An independent target factor can name the app for TYPE_TEXT even
+            # with an observed editor. Require a new Jev field choice, never a
+            # locally guessed insertion, including an unfocused document body.
+            for bundle in (BUNDLE, "com.apple.Notes"):
+                for focused in (True, False):
+                    result = setup(bundle=bundle, focused=focused)
+                    result[3].URLForApplicationWithBundleIdentifier_ = lambda candidate: candidate if candidate == bundle else None
+                    plan = [("TYPE_TEXT", bundle, "span_0")]
+                    if not focused:
+                        plan.append(("FOCUS_FIELD", "editor", "span_0"))
+                    plan.append(("TYPE_TEXT", "editor", "span_0"))
+                    client = Jev(plan=plan)
+                    report = run(f"app_target_to_field_{bundle}_{focused}", result, client=client)
+                    self.assertEqual(report["outcome"], "completed")
+                    self.assertFalse(report["steps"][0]["effect_sent"])
+                    self.assertEqual(result[1].editor.attrs["AXValue"], "before hello 🦊")
+                    self.assertEqual(result[3].activation_count, 0)
+                    self.assertEqual(len(client.calls), len(plan))
+                    targets = client.calls[1]["semantic_options"]["targets"]
+                    self.assertEqual(set(targets), {"none", "field_0"})
+                    self.assertEqual(client.calls[1]["desktop_state"]["pending_payload_id"], "span_0")
+
+            result = setup(focused=False)
+            result[3].bundle = "com.apple.Safari"
+            client = Jev(plan=[("OPEN_APP_FOR_TEXT", BUNDLE, "span_0"),
+                               ("TYPE_TEXT", BUNDLE, "span_0"),
+                               ("FOCUS_FIELD", "editor", "span_0"),
+                               ("TYPE_TEXT", "editor", "span_0")])
+            report = run("open_app_target_focus_type", result, client=client)
+            self.assertEqual(report["outcome"], "completed")
+            self.assertEqual(len(report["steps"]), 4)
+            self.assertFalse(report["steps"][1]["effect_sent"])
+            self.assertEqual(result[3].activation_count, 1)
+            self.assertEqual(result[1].effects, [("AXFocused", True), ("AXSelectedText", "hello 🦊")])
+
+            for name, second, options in (
+                ("repeat_app_target", ("TYPE_TEXT", BUNDLE, "span_0"), ()),
+                ("changed_field_payload", ("TYPE_TEXT", "editor", "span_1"), ()),
+                ("stop_field_correction", ("STOP", "none", "none"), ()),
+                ("dry_run_field_correction", ("TYPE_TEXT", "editor", "span_0"), ("--dry-run",)),
+            ):
+                result = setup()
+                client = Jev(plan=[("TYPE_TEXT", BUNDLE, "span_0"), second])
+                report = run(name, result, goal='type "hello" rather than "goodbye"', client=client, options=options)
+                self.assertIn(report["outcome"], {"failed", "incomplete", "dry_run"})
+                self.assertEqual(len(client.calls), 2)
+                self.assertFalse(report["effect_sent"])
+                self.assertEqual(result[1].effects, [])
+                self.assertEqual(result[2].events, [])
+
+            other_app = setup()
+            report = run("app_target_cannot_use_other_app_field", other_app,
+                         client=Jev(plan=[("TYPE_TEXT", "com.apple.Safari", "span_0")]))
+            self.assertEqual(report["outcome"], "unsupported")
+            self.assertEqual(other_app[1].effects, [])
+
+            switched = setup()
+
+            def switch_after_app_choice():
+                switched[3].bundle = "com.apple.Safari"
+
+            client = Jev(plan=[("TYPE_TEXT", BUNDLE, "span_0"), ("TYPE_TEXT", "editor", "span_0")],
+                         after_call=switch_after_app_choice)
+            report = run("app_switch_before_field_correction", switched, client=client)
+            self.assertEqual(report["outcome"], "failed")
+            self.assertEqual(len(client.calls), 1)
+            self.assertIn("foreground app changed", report["reason"])
+            self.assertEqual(switched[1].effects, [])
 
             notes = setup(bundle="com.apple.Notes")
             workspace = notes[3]

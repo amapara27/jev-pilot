@@ -11,7 +11,7 @@ from .models import ActionCandidate
 from .desktop import DesktopError, DesktopState
 from .safety import blocked_goal, disposition
 from .verification import verify_action
-from .semantics import SemanticError
+from .semantics import SemanticError, SemanticMenu
 from .text_input import TextInputError
 
 
@@ -36,6 +36,7 @@ def run_goal(
     }
     started = stage = perf_counter()
     pending_payload_id = None
+    field_choice_bundle = None
 
     def timing(name: str) -> None:
         """Accumulate phase costs across the bounded preparation sequence."""
@@ -57,6 +58,16 @@ def run_goal(
             report["verified"] = False
             before: DesktopState = desktop.snapshot()
             menu = desktop.semantic_menu(goal, before)
+            if field_choice_bundle is not None:
+                if before.active is None or before.active.bundle_id != field_choice_bundle:
+                    raise DesktopError("The foreground app changed before choosing its typing field.")
+                # Correct an app-level typing choice through Jev, using only
+                # this app's fresh fields. No field is selected locally.
+                menu = SemanticMenu(goal, {
+                    key: facts for key, facts in menu.targets.items()
+                    if key == "none" or (facts.get("scope") == "field"
+                                         and facts.get("bundle_identifier") == field_choice_bundle)
+                }, menu.payloads)
             report["observed_app"] = before.active.name if before.active else None
             report["accessibility_trusted"] = before.ax_trusted
             report["editor_readiness"] = {
@@ -88,6 +99,19 @@ def run_goal(
                 report["reason"] = "Jev selected STOP before typing was completed; no further effect was sent."
                 return report
             if action is None:
+                target = decision.semantic["target"]
+                if (decision.semantic["operation"] == "TYPE_TEXT"
+                        and target.get("scope") == "application"
+                        and field_choice_bundle is None and before.ax_trusted
+                        and before.active and before.active.bundle_id == decision.semantic["target_id"]
+                        and any(item.bundle_id == before.active.bundle_id
+                                and (item.can_type or (item.focusable and not item.focused))
+                                for item in before.text_fields)):
+                    field_choice_bundle = before.active.bundle_id
+                    pending_payload_id = payload_id
+                    step["outcome"] = "reselect_field"
+                    step["reason"] = "Jev selected the app for typing; requesting a fresh observed field choice."
+                    continue
                 report["outcome"] = "unsupported"
                 report["reason"] = "No executable grounded target is available for the selected operation."
                 if decision.semantic["operation"] == "TYPE_TEXT":

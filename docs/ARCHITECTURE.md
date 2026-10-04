@@ -59,6 +59,14 @@ readable value and valid UTF-16 selection plus an exact span. App-level TYPE_TEX
 can be described semantically but has no executable target. SEARCH/CREATE_NOTE/
 RUN_COMMAND remain unsupported. No executor submits commands or presses Return.
 
+If Jev selects application-level TYPE_TEXT while that app is frontmost and has
+an observed typeable or focusable editor, record a `reselect_field` step with no
+effect. Bind its exact payload and ask Jev again using only that app's fresh field
+targets plus none. This consumes the same four-step budget; Jev must still choose
+FOCUS_FIELD when needed, then TYPE_TEXT. Never map the app directly to an editor.
+A changed foreground app, changed payload, missing usable editors, or repeated app
+ID cannot authorize insertion. Other incompatible choices still reject normally.
+
 There are at most four steps per run. Each prerequisite must verify before the
 next request; previous verified operations are provided to Jev. A completed
 insertion terminates the run immediately, preventing a second insertion. STOP
@@ -147,15 +155,48 @@ state to TypeSafe but stops before the first effect, including preparation.
 Offline production-pipeline checks leave `.build/python-e2e.json` and
 `.build/typing-e2e.json`. The typing checks fake only Jev and native API boundaries,
 exercising production discovery, semantics, safety, dispatch, and verification.
-`python -m scripts.test_typing_native` uses a disposable TextEdit fixture with
-scripted Jev; `--live-jev` additionally calls TypeSafe. Only its identified fixture
-may receive an effect. It writes `.build/typing-native.json` and fails, rather than
-skips, on missing permissions/readiness. This development Python host currently
+`python -m scripts.test_typing_native` creates a uniquely named disposable
+TextEdit fixture, restores the starting foreground app, then sends `open TextEdit
+and type ...` through the production CLI. Scripted Jev chooses activation, any
+necessary field focus, and insertion from fresh menus; `--live-jev` uses TypeSafe.
+Only TextEdit activation and the identified fixture's body may receive runtime
+effects. Match its unique title and AXDocument URL when present; require the exact
+fixture baseline before insertion. Success requires verified app preparation and
+exact insertion (`workflow_verified=true`), not an already-focused-editor preflight.
+It writes `.build/typing-native.json` and fails on missing permissions/readiness.
+`--inspect Notes` or `--inspect TextEdit` reads a running app's editor capability/
+error facts without activation, effects, provider calls, or printing document text.
+The command harness is independently checked with fake native boundaries in
+`.build/native-harness-e2e.json`; this artifact is offline evidence only. This development Python host currently
 has no AX permission: native insertion remains unverified. User-run reports show
 their CLI host has permission; permission attribution differs between hosts.
+
+Native discovery reports `text_field_checks` (at most 32 records) with roles,
+focus, AXEnabled error/type/Boolean result, and write/focus capabilities; ancestry
+failures retain attribute-specific error counts. Existing values, selections,
+labels and handles are omitted from these diagnostics. The user’s native Notes
+inspection confirmed a focused AXTextArea was discarded because AXEnabled returned
+kAXErrorAttributeUnsupported (-25205). Only that specific unsupported attribute
+may defer to positive AXSelectedText/AXValue writability or AXEditable=true. Explicit
+false/invalid enabled values, NoValue (-25212), and other read errors still reject.
+Terminal’s special text-area allowance is not write evidence for this exception.
+Secure ancestry, window identity, and exact focused text/caret checks still apply.
+Diagnostics mark availability_check=write_support for accepted unsupported cases.
+Native true accepts Boolean or integer 1 for AXEnabled/AXEditable. E2E regressions
+cover unsupported-enabled focused/unfocused Notes/TextEdit fields, the native
+command harness, and read-only/secure/no-write/error rejection. The Notes editor
+was reached directly before rejection; scan_limit_reached=true describes remaining
+list traversal, not the cause of this editor’s absence. The user confirmed
+successful Notes typing after this fix on 2026-10-04. Formal native-harness and
+TextEdit acceptance remain pending; this tool’s Python host remains untrusted.
 
 ## Remaining roadmap
 
 Prove real app/editor compatibility after granting native permissions. Notes
 creation, Finder search/open-result workflows, Terminal submission, general
 multi-step goals, speech, queues, and streaming remain future work.
+
+User confirmation (2026-10-04): Notes typing worked after the AXEnabled
+attribute-unsupported compatibility fix. This establishes a successful user-run
+Notes workflow. The formal native-harness result and TextEdit acceptance remain
+pending independent confirmation.
