@@ -27,6 +27,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="jev-latest")
     parser.add_argument("--dry-run", action="store_true", help="Choose without executing.")
     parser.add_argument("--yes", action="store_true", help="Approve low-confidence supported native actions.")
+    parser.add_argument('--auto-approve-basic', action='store_true', help='Skip confidence prompts for app opening/focus and supported web/Finder search; retain all native guards and other approvals.')
     parser.add_argument("--request-accessibility", action="store_true", help="Ask macOS for Accessibility access for this CLI host.")
     parser.add_argument("--listen", action="store_true", help="Continuously transcribe microphone utterances and send each final transcript to Jev.")
     parser.add_argument("--transcribe-only", action="store_true", help="Listen and print transcripts without calling Jev or controlling the desktop.")
@@ -111,6 +112,9 @@ def _run_voice(
 
         transcripts.append(text)
         print(f"\nTranscript: {text}", file=output, flush=True)
+        if not args.transcribe_only and text.strip().casefold().strip('.!?') in {'stop listening', 'stop pilot', 'quit pilot'}:
+            stopping.set()
+            return
         if args.transcribe_only:
             return
         if stream is not None:
@@ -140,7 +144,7 @@ def _run_voice(
     def approve(action: ActionCandidate) -> bool:
         """Require interactive confirmation unless this invocation used --yes."""
 
-        if args.yes and action.kind != "PRESS_CONTROL":
+        if args.yes and action.kind != "PRESS_CONTROL" and not action.parameters.get('requires_confirmation'):
             return True
         if not sys.stdin.isatty():
             return False
@@ -166,13 +170,38 @@ def _run_voice(
             allowed_operations={"OPEN_APP", "FOCUS_APP", "STOP"} if prefix else None,
             intended_bundle=intended_bundle if not prefix else None,
             stream_app=intended_bundle if prefix else None,
+            auto_approve_basic=args.auto_approve_basic,
         )
         entry = {"transcript": goal, "source": "stable_prefix" if prefix else "final", **result}
         runs.append(entry)
         print(json.dumps(entry, indent=2, sort_keys=True), file=output, flush=True)
         if result["outcome"] not in {"completed", "dry_run"}:
             worker_error.append(str(result.get("reason", result["outcome"])))
-            stopping.set()
+            # Queued follow-ups may depend on this effect; only newly spoken goals resume.
+            while not committed.empty():
+                pending.append(committed.get_nowait()[0])
+                committed.task_done()
+            if prefix:
+                stopping.set()
+            else:
+                print('Command stopped. Still listening for a new command.', file=output, flush=True)
+        else:
+            print('Ready for the next command.', file=output, flush=True)
+        _save_report(args.report, voice_report())
+
+    def voice_report():
+        """Persist the session after each goal so continuous testing leaves evidence."""
+
+        result = {
+            'schema_version': 1, 'mode': 'transcribe_only' if args.transcribe_only else 'voice',
+            'model': getattr(model, 'model_id', 'mlx-community/nemotron-3.5-asr-streaming-0.6b-8bit'),
+            'transcripts': list(transcripts), 'committed_prefixes': list(prefixes),
+            'rejected_transcripts': list(rejected), 'runs': list(runs),
+            'pending_not_run': list(pending), 'utterances': max(utterance_count[0], len(transcripts)),
+        }
+        if worker_error:
+            result['worker_error'] = worker_error[-1]
+        return result
 
     error = None
     if args.transcribe_only:
@@ -194,14 +223,14 @@ def _run_voice(
         capture_thread = Thread(target=capture, name="nemotron-streaming-asr", daemon=True)
         capture_thread.start()
         try:
-            while not capture_done.is_set() or not committed.empty():
+            while not stopping.is_set() and (not capture_done.is_set() or not committed.empty()):
                 try:
                     goal = committed.get(timeout=0.05)
                 except queue.Empty:
                     continue
                 try:
                     execute(goal)
-                    if worker_error:
+                    if stopping.is_set():
                         break
                 finally:
                     committed.task_done()
@@ -220,17 +249,7 @@ def _run_voice(
             pending.append(committed.get_nowait()[0])
             committed.task_done()
 
-    result = {
-        "schema_version": 1,
-        "mode": "transcribe_only" if args.transcribe_only else "voice",
-        "model": getattr(model, "model_id", "mlx-community/nemotron-3.5-asr-streaming-0.6b-8bit"),
-        "transcripts": transcripts,
-        "committed_prefixes": prefixes,
-        "rejected_transcripts": rejected,
-        "runs": runs,
-        "pending_not_run": pending,
-        "utterances": max(utterance_count[0], len(transcripts)),
-    }
+    result = voice_report()
     if error:
         result["error"] = error
     if worker_error:
@@ -272,7 +291,7 @@ def main(
     goal = " ".join(args.goal)
 
     def approve(action: ActionCandidate) -> bool:
-        if args.yes and action.kind != "PRESS_CONTROL":
+        if args.yes and action.kind != "PRESS_CONTROL" and not action.parameters.get('requires_confirmation'):
             return True
         if not sys.stdin.isatty():
             return False
@@ -289,6 +308,7 @@ def main(
             dry_run=args.dry_run,
             approve=approve,
             client=client,
+            auto_approve_basic=args.auto_approve_basic,
         )
     except KeyboardInterrupt:
         report = {"schema_version": 3, "goal": goal, "outcome": "cancelled", "reason": "Interrupted; an already sent effect cannot be undone."}

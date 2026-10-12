@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 from Foundation import NSURL
 
@@ -150,10 +151,16 @@ class WebPipelineTests(unittest.TestCase):
                 ("explicit_browser", "open example.com in Chrome", "OPEN_WEBSITE", CHROME, "google", "https://example.com/"),
                 ("google", "google best ramen near me", "SEARCH_WEB", SAFARI, "google", "https://www.google.com/search?q=best+ramen+near+me"),
                 ("youtube_search", "search youtube for lofi hip hop", "SEARCH_WEB", SAFARI, "youtube", "https://www.youtube.com/results?search_query=lofi+hip+hop"),
+                ('youtube_suffix', 'search for messi soccer videos on youtube', 'SEARCH_WEB', SAFARI, 'youtube', 'https://www.youtube.com/results?search_query=messi+soccer+videos'),
+                ('youtube_find_suffix', 'Find me Messi soccer videos on YouTube.', 'SEARCH_WEB', SAFARI, 'youtube', 'https://www.youtube.com/results?search_query=Messi+soccer+videos'),
+                ('youtube_quoted_suffix', 'search for "café 🦊 soccer" on YouTube in Chrome', 'SEARCH_WEB', CHROME, 'youtube', 'https://www.youtube.com/results?search_query=caf%C3%A9+%F0%9F%A6%8A+soccer'),
                 ("literal_commands", "google how to create a new note and type hello", "SEARCH_WEB", SAFARI, "google", "https://www.google.com/search?q=how+to+create+a+new+note+and+type+hello"),
+                ("literal_keyboard_words", "google how to copy and paste and scroll down", "SEARCH_WEB", SAFARI, "google", "https://www.google.com/search?q=how+to+copy+and+paste+and+scroll+down"),
                 ("unicode_query", 'search Google for "café 🦊 & a+b" in Chrome', "SEARCH_WEB", CHROME, "google", "https://www.google.com/search?q=caf%C3%A9+%F0%9F%A6%8A+%26+a%2Bb"),
             ):
                 client = WebJev(operation, browser, site)
+                if operation == 'SEARCH_WEB':
+                    client.text = next(iter(parse_qs(urlsplit(expected).query).values()))[0]
                 report, workspace = run(name, goal, client)
                 self.assertEqual(report["outcome"], "completed", report)
                 self.assertEqual(client.calls, 1)
@@ -171,6 +178,7 @@ class WebPipelineTests(unittest.TestCase):
             for name, mutate, options, confidence, outcome in (
                 ("dry_run", None, ("--dry-run",), 0.99, "dry_run"),
                 ("approval_rejected", None, (), 0.3, "rejected"),
+                ("basic_auto_approval", None, ('--auto-approve-basic',), 0.3, 'completed'),
                 ("url_not_observed", lambda d, w, a, c: setattr(w, "visible", False), (), 0.99, "unverified"),
                 ("native_failure", lambda d, w, a, c: setattr(w, "fail", True), (), 0.99, "failed"),
                 ("no_ax", lambda d, w, a, c: setattr(a, "trusted", False), (), 0.99, "unverified"),
@@ -180,7 +188,7 @@ class WebPipelineTests(unittest.TestCase):
             ):
                 report, workspace = run(name, "go to youtube", WebJev("OPEN_WEBSITE", confidence=confidence), mutate=mutate, options=options)
                 self.assertEqual(report["outcome"], outcome, report)
-                self.assertEqual(len(workspace.requests), int(name in {"url_not_observed", "native_failure", "no_ax"}))
+                self.assertEqual(len(workspace.requests), int(name in {"url_not_observed", "native_failure", "no_ax", 'basic_auto_approval'}))
                 if name == "final_native_drift":
                     self.assertFalse(report["effect_sent"])
 
@@ -200,6 +208,10 @@ class WebPipelineTests(unittest.TestCase):
 
             report, workspace = run("web_cannot_type_into_document", "google ramen", WebJev("TYPE_TEXT", "field_0"), mutate=ready_editor)
             self.assertEqual(report["outcome"], "failed")
+            self.assertEqual(workspace.requests, [])
+            report, workspace = run('suffix_site_is_not_query_text', 'search for messi soccer videos on youtube',
+                                    WebJev('SEARCH_WEB', site='youtube', text='messi soccer videos on youtube'))
+            self.assertEqual(report['outcome'], 'failed')
             self.assertEqual(workspace.requests, [])
 
             def web_area(desktop, workspace, ax, client):

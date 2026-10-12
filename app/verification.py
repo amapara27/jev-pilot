@@ -71,6 +71,11 @@ def verify_action(desktop: object, action: ActionCandidate, before: object, time
         if observations is not None:
             observations[:] = [state]
         details.update(reason="effect_not_observed", editor_readiness=editor_readiness(state))
+        if action.kind in {'KEYBOARD_ACTION', 'SCROLL'}:
+            target = next(item for item in before.interaction_targets if item.id == action.parameters['element_id'])
+            if desktop.interactions.verified(target, before, state):
+                details['reason'] = 'native_command_effect_observed'
+                return True
         if action.kind == "OPEN_ITEM" and state.document_url == action.parameters["url"]:
             details["reason"] = "destination_document_observed"
             return True

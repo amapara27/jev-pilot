@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import re
 from time import monotonic
 
@@ -16,6 +16,7 @@ from .workflows import NativeWorkflows, WorkflowTarget, WORKFLOW_KINDS, file_ide
 from .verification import selected_notes
 from .app_catalog import APP_ALIASES, APPLICATION_ROOTS, discover_applications
 from .web_navigation import BROWSER_BUNDLES, SEARCH_SITES, WEB_OPERATIONS, browser_url, normalize_web_url
+from .interactions import NativeInteractions, InteractionTarget
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class DesktopState:
     workflow_targets: tuple[WorkflowTarget, ...] = ()
     document_url: str | None = None
     browser_url: str | None = None
+    interaction_targets: tuple[InteractionTarget, ...] = ()
 
     def provider_state(self) -> dict[str, object]:
         """Send only the active app; candidates already describe named targets."""
@@ -66,6 +68,7 @@ class MacDesktop:
         self.workspace = workspace if workspace is not None else NSWorkspace.sharedWorkspace()
         self.text = text if text is not None else NativeText()
         self.workflows = NativeWorkflows(self.text)
+        self.interactions = NativeInteractions(self.text)
         self.applications = discover_applications(application_roots)
 
     def application_catalog(self, state: DesktopState | None = None) -> tuple:
@@ -133,7 +136,10 @@ class MacDesktop:
                 document_url = resolved[0] if resolved else None
                 if active.bundle_id in BROWSER_BUNDLES or active.bundle_id == self.default_browser():
                     current_browser_url = browser_url(self.text, window)
-        return DesktopState(active, running, trusted, focused, fields, diagnostics, workflow_targets, document_url, current_browser_url)
+        state = DesktopState(active, running, trusted, focused, fields, diagnostics, workflow_targets, document_url, current_browser_url)
+        if trusted and focused and getattr(self, 'interaction_commands', ()):
+            state = replace(state, interaction_targets=self.interactions.scan(state, application, window))
+        return state
 
     def semantic_menu(self, goal: str, state: DesktopState) -> SemanticMenu:
         """Ground all supported installed apps without locally classifying the goal."""
@@ -188,6 +194,9 @@ class MacDesktop:
         for item in state.workflow_targets:
             if item.kind in {"item", "control"}:
                 targets[item.id] = item.provider_target()
+        for item in state.interaction_targets:
+            if item.command in getattr(self, 'interaction_commands', ()):
+                targets[item.id] = item.provider_target()
         return SemanticMenu(goal, targets, payloads)
 
     def validate_action(self, action: ActionCandidate, before: DesktopState, fresh: DesktopState) -> None:
@@ -195,6 +204,17 @@ class MacDesktop:
 
         if before.active != fresh.active or fresh.active is None:
             raise DesktopError("The foreground app changed while deciding or approving.")
+        if action.kind in {'KEYBOARD_ACTION', 'SCROLL'}:
+            if before.browser_url != fresh.browser_url:
+                raise TextInputError('The browser page changed before the command; no effect was sent.')
+            if fresh.active.bundle_id == 'com.apple.Notes' and selected_notes(before) != selected_notes(fresh):
+                raise TextInputError('The selected note changed before the command; no effect was sent.')
+            identifier = action.parameters['element_id']
+            original = next((item for item in before.interaction_targets if item.id == identifier), None)
+            current = next((item for item in fresh.interaction_targets if item.id == identifier), None)
+            if not fresh.ax_trusted or not original or not current or not self.interactions.same_target(original, current):
+                raise TextInputError('The command focus, editor, menu or scroll context changed; no effect was sent.')
+            self.validated_state = fresh
         if action.kind in WEB_OPERATIONS:
             if normalize_web_url(action.parameters.get("url")) != action.parameters.get("url"):
                 raise DesktopError("The browser destination is not a validated HTTP URL.")
@@ -224,6 +244,21 @@ class MacDesktop:
     def execute(self, action: ActionCandidate) -> None:
         """Dispatch a native app, field focus, or insertion effect without replay."""
 
+        if action.kind in {'KEYBOARD_ACTION', 'SCROLL'}:
+            fresh = self.snapshot()
+            self.validate_action(action, self.validated_state, fresh)
+            target = next(item for item in fresh.interaction_targets if item.id == action.parameters['element_id'])
+
+            def guard():
+                frontmost = self.workspace.frontmostApplication()
+                if frontmost is None or int(frontmost.processIdentifier()) != target.pid:
+                    return False
+                application = self.text.ax.AXUIElementCreateApplication(target.pid)
+                return (self.text.equal(self.text.read(application, 'AXFocusedWindow'), target.window)
+                        and self.text.equal(self.text.read(application, 'AXFocusedUIElement'), target.focused))
+
+            self.interactions.execute(target, guard)
+            return
         if action.kind in WORKFLOW_KINDS:
             fresh = self.snapshot()
             try:

@@ -29,6 +29,7 @@ voice: microphone callback → bounded ordered PCM queue → Nemotron streaming 
 | `app/web_navigation.py` | HTTP URL normalization, search encoding and bounded browser URL observation/matching. |
 | `app/text_input.py` | Bounded AX editor discovery, identity continuity, local document/caret facts, UTF-16 replacement, guarded text/focus dispatch. |
 | `app/workflows.py` | Bounded Notes/Finder controls, local file identity, guarded menu/query/selection effects. |
+| `app/interactions.py` | Explicit command order, focused editor/enabled menu/scroll-range grounding, guarded keys/wheel/AX effects and local outcome evidence. |
 | `app/semantics.py` | Operation vocabulary, exact goal spans, combination checks, local action resolution. |
 | `app/decision.py` | One TypeSafe call with operation, payload and speculative per-operation targets; validate only the chosen head. |
 | `app/models.py` | Executable actions and validated semantic decisions. |
@@ -39,6 +40,47 @@ voice: microphone callback → bounded ordered PCM queue → Nemotron streaming 
 | `app/speech_runtime.py` | Capture mono audio, bound backlog, stream one decoder consumer, and commit final text at EOU. |
 
 ## Semantic authority and preparation
+
+Explicit KEYBOARD_ACTION/SCROLL targets are collected only for recognized command
+goals; ordinary insertion keeps its native implementation and scanner path.
+Command parsing shields quoted and dictated/search text, requiring an explicit
+connector for unquoted command tails. Ordered next_command filtering and runtime
+checks prevent skipped/repeated shortcuts. Typing remains one insertion, followed
+only by explicitly requested commands within the eight-step workflow bound.
+Completed TYPE_TEXT is withdrawn, and Enter after insertion requires the same
+verified editor/value/caret. A typing span containing an explicit command tail
+is rejected; quote those words to insert them literally.
+
+Interaction snapshots retain native window/focus/editor handles and baselines
+locally. A bounded 256-node/half-second scan collects enabled English menu
+commands and scroll areas, preferring the area containing focus. Text commands
+require a verifiable focused editor, copy/cut require selection, and select-all
+requires text. Browser commands require a known browser and an observed menu.
+Menu shortcuts invoke AXPress; select-all uses a writable native UTF-16 selection
+range or enabled Select All menu, avoiding keyboard-layout assumptions.
+Enter/Tab/Shift-Tab/Escape use paired PID-directed Quartz events. Enter never executes in Terminal/iTerm. Keyboard
+permission preflight and a final PID/window/focus guard precede event dispatch.
+Notes selection identity is rechecked independently of editor identity.
+
+Directional scrolling uses one pixel-unit wheel event positioned within an
+observed area with readable remaining range. Top/bottom use writable AX scrollbar
+positions. Range, bounds, native scrollbar/window/focus and editor context are
+freshly validated. Verification requires movement in the requested direction
+or exact boundary position; no event replay. Clipboard contents are never read;
+copy/cut use changeCount plus unchanged/exactly cut editor evidence. TextEdit/Notes
+Enter verifies exact newline/caret; selection verifies the complete UTF-16 range.
+Paste/undo/redo require changed editor values; other menu/navigation/focus actions
+need a native focus/window/document/browser URL change, changed tab selection/identity, reload busy/page identity, or observable reset-zoom availability. Unobservable effects stay
+unverified even if the event was sent.
+
+--auto-approve-basic changes only confidence prompts for app activation, HTTP
+navigation and supported searches. It cannot bypass blocks, fresh identity checks
+or verification. Cut/paste/close-tab and generic editor Enter always confirm,
+including with --yes. Continuous voice checkpoints after each run and survives
+per-goal failures; queued follow-ups behind a failure are discarded. New utterances
+resume with fresh context. Spoken stop and Control-C cancel before the next effect;
+capture errors, overload and failed committed prefixes still stop the session.
+The voice report retains failures and the process exit status reflects them.
 
 Installed app discovery runs at desktop construction, reading standard install
 folders and nested utility folders without descending into app/framework/helper
@@ -54,6 +96,11 @@ Jev receives native default-browser facts; neither operation needs address-bar
 typing or Return. Local normalization rejects credentials, non-HTTP schemes,
 invalid domains/ports and control characters. Search uses URL encoding, and
 command-like query words stay literal. Finder SEARCH remains separate.
+Suffix-site search/find/locate forms propose an exact query span ending before
+“on/in YouTube/Google,” with optional browser context. Explicit Finder and prior
+typing remain shielded. Required effects classify these forms as SEARCH_WEB.
+The local resolver and eligible payload Choices reject inclusion of the site
+suffix, rather than silently rewriting a model-selected span.
 Web-only goals withdraw editor, Finder and control effects from Jev's executable
 operation Choice; a mistaken typing answer cannot insert a query into a document.
 The executor rechecks foreground identity and browser installation immediately
@@ -81,7 +128,7 @@ Each step sends operation, payload and target_OPERATION Choices in one request.
 Targets are restricted to each operation's grounded candidates. Only the selected
 operation's target head authorizes input; unused answers are ignored, but the
 response must have exactly the requested head names. Shared semantic_options retains
-the full bounded menu. Schema-3 reports retain canonical operation/target/payload
+operation definitions and executable target facts once. Schema-3 reports retain canonical operation/target/payload
 factors. Only currently available operations enter the operation Choice. Withdraw
 completed one-shot prerequisites and verified control IDs; withhold typing until
 required creation/control preparation verifies. After unique editor preparation,
@@ -93,9 +140,14 @@ total/count/normalization per factor, including factor-specific rejection detail
 Minimum factor confidence drives approval; independent factors are not a joint
 probability. Incompatible choices reject the whole decision without fallback effects.
 
-Target question criteria contain allowed IDs with null descriptions; full facts
-live once in shared semantic_options.targets. Operation criteria contain their
-descriptions, retaining compatibility lists in shared state. Redundant bundle IDs
+Operation and target question criteria contain allowed IDs with null descriptions;
+operation definitions and target facts live once in shared semantic_options.
+Compatibility lists exist only in target Choices; withdrawn heads keep `none`.
+Shared target facts cover only targets used by currently executable operations,
+excluding irrelevant controls/editors for pure web goals. The native catalog/menu
+and report metadata remain complete; this does not truncate installed apps.
+The payload Choice is the union of executable operations' allowed payloads.
+Redundant bundle IDs
 and native PID lists are omitted only from provider application facts; local
 resolution, identity checks and schema-3 reports retain the complete metadata.
 Repeating a 263-app catalog across speculative heads caused HTTP 400 context
@@ -109,6 +161,14 @@ request and accepted the compact 121,189-byte Notes dry run (40,190 input tokens
 `.build/request-limit-reproduction.json` and `.build/live-request-e2e.json` retain
 that evidence without establishing native app compatibility.
 
+The later Music foreground report contained 299 targets and rejected both the
+Messi suffix-search phrase and Open Safari before effects. The remaining duplicated
+compatibility lists and unused target heads were removed. Dense-catalog E2E covers
+263 apps plus 36 long controls; opt-in live checks accept that app request and the
+exact suffix search. A first live suffix search included the site in the query;
+strict local span constraints now make that tuple unavailable. These checks use
+synthetic native state, so they establish provider acceptance rather than app behavior.
+
 OPEN_APP/FOCUS_APP are one-action only when no recognized effect remains. Explicit
 OPEN_APP_FOR_TEXT/FOCUS_APP_FOR_TEXT request activation followed by fresh editor
 observation; FOCUS_FIELD requests one native focus effect followed by another Jev
@@ -118,7 +178,7 @@ and cannot change before insertion. TYPE_TEXT requires a focused field with a
 readable value and valid UTF-16 selection plus an exact span. App-level TYPE_TEXT
 is rejected, not corrected into an editor. Scoped SEARCH and
 CREATE_NOTE execute only with current native controls. RUN_COMMAND remains
-unsupported. No executor submits commands or presses Return.
+unsupported. No executor submits Terminal commands; explicit guarded Enter remains separate from insertion.
 
 OPEN/FOCUS_APP_FOR_WORKFLOW, CREATE_NOTE and PREPARE_SEARCH accept a carried future
 span, exactly like typing preparation; native parameters for those effects contain
@@ -144,14 +204,14 @@ inherit approval, recover text/caret/file/app drift, or replay a sent effect.
 
 Typing-only runs have at most four steps. Each prerequisite must verify before the
 next request; previous verified operations are provided to Jev. A completed
-insertion terminates the run immediately, preventing a second insertion. STOP
+insertion terminates ordinary typing runs; explicit command tails continue without another insertion. STOP
 after preparation reports incomplete, and exhausted preparation is incomplete.
 Completed preparation effects are never undone. Ordinary app activation does not
 finish pending typing. Recognized Notes/Finder workflows have eight steps, with
 required operations derived from supported command forms while shielding quoted
 and typed payloads. Jev chooses every step. A skipped creation/search prerequisite
 is withheld, STOP is incomplete, repeated workflow effects are denied, and one
-insertion terminates the run. These are scoped workflows, not general planning.
+insertion terminates workflows without explicit keyboard/scroll tails. These are scoped workflows, not general planning.
 
 ## Notes and Finder controls
 
@@ -246,7 +306,7 @@ stay local. Labels may themselves contain app-provided text. Schema-3 reports
 contain semantic decisions, exact dictated payloads, per-factor metadata, step
 outcomes, aggregate timings, and completion scope. `single_insertion` verifies
 one insertion; `selected_action` verifies ordinary activation. `verified_workflow`
-requires every recognized Notes/Finder operation and records verified_operations.
+requires every recognized workflow effect and every ordered explicit input command; records verified_operations.
 None claims arbitrary free-form goal completion. Review reports before sharing.
 Rejected combinations include validated choice IDs, factor confidences and
 distributions under `rejected_decision`, without raw provider bodies.
@@ -263,8 +323,7 @@ Regression scenarios cover 170-note trees, both pane orders, visible-children
 support or absence, and focus on row/table/window/body. Native Python insertion
 remains unverified on this tool host; native UI inspection alone does not prove it.
 
-Confidence below 0.65 requires approval. `--yes` approves low-confidence native
-app/focus/typing actions only; it does not bypass blocks or fresh validation.
+Typing/app confidence below 0.65 and workflow/interaction confidence below 0.82 require approval. `--yes` can approve low-confidence supported actions, but unknown control presses and interaction targets requiring confirmation stay interactive. --auto-approve-basic applies only to app activation/navigation/search. Neither bypasses blocks or fresh validation.
 Sensitive goal wording is blocked before Jev. `--dry-run` still sends bounded
 state to TypeSafe but stops before the first effect, including preparation.
 
@@ -324,8 +383,8 @@ capture continues. Input and goal queues are bounded; overflow is an explicit
 error, never silent data loss. Final transcripts enter a five-goal FIFO. One
 execution worker calls the existing `run_goal()` on the main/AppKit thread
 with transcript text only; desktop state is observed fresh when a queued goal
-starts. ASR decoding runs alongside it. A non-success outcome stops the
-worker and leaves later goals in the report as not run. Stop/Ctrl-C discards the
+starts. ASR decoding runs alongside it. A non-success outcome discards queued
+follow-ups and records them as not run; listening continues for new goals. Stop/Ctrl-C discards the
 current partial utterance and cancels the active run at its next pre-effect
 boundary; already-sent native effects cannot be undone.
 

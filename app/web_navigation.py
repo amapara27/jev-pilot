@@ -20,6 +20,32 @@ SEARCH_SITES = {"google": ("https://www.google.com/search", "q"),
                 "youtube": ("https://www.youtube.com/results", "search_query")}
 
 
+def suffix_search_span(goal: str) -> tuple[int, int, int] | None:
+    """Propose the exact query in search/find-for-query-on-site commands, shielding literals."""
+
+    quotes = list(re.finditer(r'"(?:\\.|[^"\\])*"|“[^”]*”|(?<!\w)\x27[^\x27]*\x27(?!\w)', goal))
+    masked = re.sub(r'"(?:\\.|[^"\\])*"|“[^”]*”|(?<!\w)\x27[^\x27]*\x27(?!\w)', lambda match: ' ' * len(match.group()), goal)
+    search = next((match for match in re.finditer(r'\b(?:search|find|locate)\s+(?:me\s+)?(?:for\s+)?', goal, re.I)
+                   if not any(quote.start() <= match.start() < quote.end() for quote in quotes)), None)
+    typing = re.search(r'\b(?:type|write|dictate|insert)\s+', masked, re.I)
+    if search is None or typing and typing.start() < search.start():
+        return None
+    if re.match(r'(?:in\s+)?Finder\b', goal[search.end():], re.I):
+        return None
+    site = re.search(r'(?<=\s)(?:on|in)\s+(?:youtube|google)(?=\s+(?:in|using|with)\s+[^.!?]+[.!?]?$|\s*[.!?]?$)', masked[search.end():], re.I)
+    if site is None:
+        return None
+    start, end = search.end(), search.end() + site.start()
+    while start < end and goal[start].isspace():
+        start += 1
+    while end > start and goal[end - 1].isspace():
+        end -= 1
+    quoted = next((quote for quote in quotes if quote.start() == start and quote.end() == end), None)
+    if quoted:
+        start, end = start + 1, end - 1
+    return (search.start(), start, end) if start < end else None
+
+
 def navigation_spans(goal: str) -> list[tuple[int, int]]:
     """Offer destination spans only after navigation verbs outside quoted literals."""
 

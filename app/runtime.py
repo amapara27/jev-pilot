@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from threading import Event
+import re
 import sys
 from time import perf_counter
 from typing import Callable
@@ -16,6 +17,7 @@ from .verification import verify_action, editor_readiness, note_body, same_creat
 from .semantics import SemanticError, SemanticMenu, PREPARATION_OPERATIONS, required_workflow_operations
 from .text_input import TextInputError
 from .web_navigation import WEB_OPERATIONS
+from .interactions import QUOTES, command_actions, action_operation
 
 
 MAX_STEPS = 4
@@ -33,6 +35,7 @@ def run_goal(
     allowed_operations: set[str] | None = None,
     intended_bundle: str | None = None,
     stream_app: str | None = None,
+    auto_approve_basic: bool = False,
 ) -> dict[str, object]:
     """Let Jev select each prerequisite; never repeat a sent or uncertain insertion."""
 
@@ -45,12 +48,22 @@ def run_goal(
     pending_payload_id = None
     created_note = None
     prepared_field = None
+    inserted_field = None
     pressed_controls = set()
     recoveries = 0
     required = required_workflow_operations(goal)
     workflow = bool(required - {"TYPE_TEXT"})
     limit = 8 if workflow else MAX_STEPS
     verified_operations = set()
+    commands = command_actions(goal)
+    desktop.interaction_commands = commands
+    ordered = command_actions(goal, with_positions=True)
+    masked = re.sub(QUOTES, lambda m: ' ' * len(m.group()), goal)
+    typing = re.search(r'\b(?:type|write|dictate|insert)\s+', masked, re.I)
+    if commands and typing and 'TYPE_TEXT' in required:
+        ordered.append((typing.start(), 'TYPE_TEXT'))
+    ordered = [command for _, command in sorted(ordered)]
+    command_index = 0
 
     def timing(name: str) -> None:
         """Accumulate phase costs across the bounded preparation sequence."""
@@ -82,6 +95,10 @@ def run_goal(
                 return report
             report["verified"] = False
             before: DesktopState = desktop.snapshot()
+            if inserted_field is not None and command_index < len(ordered) and ordered[command_index] == 'enter':
+                current = next((item for item in before.text_fields if item.id == inserted_field.id), None)
+                if not current or not desktop.text.same_target(inserted_field, current, typing=True):
+                    raise TextInputError('The inserted text, caret or focus changed before explicit Enter; no submission was sent.')
             if index == 0 and intended_bundle and (before.active is None or before.active.bundle_id != intended_bundle):
                 raise DesktopError("The queued instruction's intended app changed; no effect was sent.")
             menu = desktop.semantic_menu(goal, before)
@@ -90,15 +107,20 @@ def run_goal(
                 current = next((item for item in before.text_fields if item.id == prepared_field.id), None)
                 if not current or not desktop.text.same_target(prepared_field, current, typing=False):
                     raise DesktopError("The workflow's prepared editor or window changed; no further effect was sent.")
-                if "TYPE_TEXT" in required:
+                if "TYPE_TEXT" in required - verified_operations:
                     menu = SemanticMenu(goal, {key: facts for key, facts in menu.targets.items()
                                               if key in {"none", current.id}}, menu.payloads)
-            if created_note is not None and "TYPE_TEXT" in required:
+            if created_note is not None and "TYPE_TEXT" in required - verified_operations:
                 if not same_created_note(desktop, created_note, before):
                     raise DesktopError("The newly created note or its editor changed; no further effect was sent.")
                 body = note_body(before)
                 menu = SemanticMenu(goal, {key: facts for key, facts in menu.targets.items()
                                           if key in {"none", body.id}}, menu.payloads)
+            if ordered:
+                next_command = ordered[command_index] if command_index < len(ordered) else None
+                menu = SemanticMenu(goal, {key: facts for key, facts in menu.targets.items()
+                                          if facts.get('scope') != 'interaction' or facts.get('command') == next_command
+                                          and (next_command != 'enter' or inserted_field is None or facts.get('field_id') == inserted_field.id)}, menu.payloads)
             report["observed_app"] = before.active.name if before.active else None
             report["accessibility_trusted"] = before.ax_trusted
             report["editor_readiness"] = editor_readiness(before)
@@ -119,6 +141,10 @@ def run_goal(
             state["pending_payload_id"] = pending_payload_id
             state["required_operations"] = sorted(required) if workflow else []
             state["remaining_operations"] = sorted(required - verified_operations) if workflow else []
+            if ordered:
+                state['next_command'] = next_command
+                state['remaining_operations'] = sorted((required - verified_operations) | {
+                    'TYPE_TEXT' if item == 'TYPE_TEXT' else action_operation(item) for item in ordered[command_index:]})
             state["recent_actions"] = [{"operation": item["decision"]["semantic"]["operation"],
                                         "target_id": item["decision"]["semantic"]["target_id"],
                                         "effect_sent": item["effect_sent"], "verified": item["verified"],
@@ -163,6 +189,19 @@ def run_goal(
                 report["outcome"] = "unsupported"
                 report["reason"] = "No executable grounded target is available for the selected operation."
                 return report
+            if ordered and action.kind in {'TYPE_TEXT', 'KEYBOARD_ACTION', 'SCROLL'}:
+                selected = 'TYPE_TEXT' if action.kind == 'TYPE_TEXT' else action.parameters['command']
+                if selected != next_command:
+                    raise DesktopError('The selected input action skipped the next explicit command; no effect was sent.')
+            if action.kind == 'TYPE_TEXT' and 'TYPE_TEXT' in verified_operations:
+                raise DesktopError('The insertion already verified; it was not repeated.')
+            if ordered and action.kind == 'PRESS_CONTROL' and 'PRESS_CONTROL' not in required:
+                raise DesktopError('Explicit keyboard commands must use their grounded command target; no generic press was sent.')
+            if action.kind == 'TYPE_TEXT' and commands:
+                payload = decision.semantic['payload']
+                tails = [position for position, _ in command_actions(goal, with_positions=True) if position > typing.start()]
+                if tails and payload['end'] > min(tails):
+                    raise SemanticError('The chosen typing span includes an explicit command tail; quote it to type those words literally.')
             if action.parameters.get("continue_typing") and not before.ax_trusted:
                 raise TextInputError("Typing preparation requires macOS Accessibility permission.")
             if (action.kind == "TYPE_TEXT" and bool((required & {"CREATE_NOTE", "PRESS_CONTROL"}) - verified_operations)
@@ -218,7 +257,7 @@ def run_goal(
             timing("fresh_target")
             if cancellation_requested():
                 return report
-            policy = disposition(action, decision.confidence)
+            policy = disposition(action, decision.confidence, auto_approve_basic=auto_approve_basic)
             report["safety"] = policy
             if policy == "deny":
                 report["outcome"] = "blocked"
@@ -263,13 +302,17 @@ def run_goal(
                 if diagnostics["reason"] == "editor_changed" and len(observations[-1].text_fields) == 1:
                     prepared_field = observations[-1].text_fields[0]
             verified_operations.add(action.kind)
+            if action.kind == 'TYPE_TEXT' and commands:
+                inserted_field = next(item for item in observations[-1].text_fields if item.id == action.parameters['element_id'])
+            if ordered and action.kind in {'TYPE_TEXT', 'KEYBOARD_ACTION', 'SCROLL'}:
+                command_index += 1
             if workflow:
-                if required <= verified_operations and required != {"PRESS_CONTROL"}:
+                if required <= verified_operations and command_index == len(ordered) and required != {"PRESS_CONTROL"}:
                     report["outcome"] = "completed"
                     report["completion_scope"] = "verified_workflow"
                     report["verified_operations"] = sorted(verified_operations)
                     return report
-                if action.kind == "TYPE_TEXT":
+                if action.kind == "TYPE_TEXT" and not commands:
                     report["outcome"] = "incomplete"
                     report["reason"] = "Typing verified but another requested workflow effect remains; insertion was not repeated."
                     return report

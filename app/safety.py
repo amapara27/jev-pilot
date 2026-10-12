@@ -22,16 +22,20 @@ def blocked_goal(goal: str) -> bool:
     )
 
 
-def disposition(action: ActionCandidate, confidence: float) -> str:
+def disposition(action: ActionCandidate, confidence: float, *, auto_approve_basic: bool = False) -> str:
     """Return allow, confirm, or deny independently of the model's recommendation."""
 
     if action.kind == "STOP":
         return "deny"
+    if action.kind in {'KEYBOARD_ACTION', 'SCROLL'}:
+        if action.parameters.get('bundle_identifier') in {'com.apple.Terminal', 'com.googlecode.iterm2'} and action.kind == 'KEYBOARD_ACTION':
+            return 'deny'
+        return 'confirm' if action.parameters.get('requires_confirmation') or confidence < 0.82 else 'allow'
     if action.kind in WEB_OPERATIONS:
         url = action.parameters.get("url")
         if not isinstance(url, str) or normalize_web_url(url) != url:
             return "deny"
-        return "allow" if confidence >= 0.82 else "confirm"
+        return "allow" if auto_approve_basic or confidence >= 0.82 else "confirm"
     if action.kind == "PRESS_CONTROL":
         label = action.parameters.get("label", "")
         if blocked_goal(label) or action.parameters.get("bundle_identifier") == "com.apple.Terminal":
@@ -47,5 +51,5 @@ def disposition(action: ActionCandidate, confidence: float) -> str:
     if action.kind not in {"OPEN_APP", "FOCUS_APP", "FOCUS_FIELD", "TYPE_TEXT", "CREATE_NOTE", "PREPARE_SEARCH", "SEARCH", "SELECT_ITEM", "OPEN_ITEM"}:
         return "deny"
     if action.kind in {"CREATE_NOTE", "SEARCH", "SELECT_ITEM", "OPEN_ITEM"}:
-        return "allow" if confidence >= 0.82 else "confirm"
-    return "allow" if confidence >= 0.65 else "confirm"
+        return "allow" if confidence >= 0.82 or auto_approve_basic and action.kind == 'SEARCH' else "confirm"
+    return "allow" if confidence >= 0.65 or auto_approve_basic and action.kind in {'OPEN_APP', 'FOCUS_APP', 'PREPARE_SEARCH'} else "confirm"

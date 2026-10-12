@@ -8,17 +8,35 @@ App targets are discovered at startup from `/Applications`, `~/Applications`, `/
 
 Website navigation accepts named sites (YouTube, Google, GitHub, Wikipedia, Reddit, Stripe, Gmail), explicit HTTP/HTTPS URLs, and spoken domains such as “stripe dot com.” Web search supports Google and YouTube. Jev selects the current default browser unless you name another installed browser. URLs open through AppKit without address-bar typing, clipboard changes, or Return. Credential-bearing URLs and non-web schemes are rejected.
 
+Search also accepts “search for messi soccer videos on YouTube” and “find me Messi soccer videos on YouTube.” A trailing site and optional browser identify the destination; the exact query span excludes those words. Quotes protect literal site words and typing/Finder queries retain their existing behavior.
+
 ```sh
 python -m app 'open Cursor'
 python -m app 'go to stripe dot com'
 python -m app 'open example.com in Chrome'
 python -m app 'google best ramen near me'
 python -m app 'search YouTube for "lofi hip hop" in Chrome'
+python -m app 'search for messi soccer videos on youtube'
 ```
 
 These commands also work through `--listen`. A browser action verifies the requested URL in the selected foreground browser's accessible window/web area; searches verify the site, path and exact query, allowing extra tracking parameters. This proves the URL was observed, not that the page finished loading. Redirects to a different URL, missing Accessibility permission or unavailable browser URL attributes produce `unverified` after one request, without retrying. Live browser compatibility still needs native acceptance.
 
 App-switching commands perform one activation. Typing commands allow up to four Jev-selected steps to activate the app, focus the intended editor, and insert text exactly once. Text replaces the current selection or inserts at the caret, preserving Unicode and whitespace. Multiline text requires an editor with writable Accessibility selected text. Keyboard fallback rejects control characters, and Terminal typing never submits a command.
+
+Explicit Enter is a separate action after exact insertion verifies. Notes and TextEdit text areas verify the resulting newline and caret; other focused editors require confirmation and an observable change. Terminal/iTerm keyboard commands remain unavailable. The existing insertion implementation is unchanged.
+
+```sh
+python -m app 'type hello world and hit enter'
+python -m app 'select all and copy'
+python -m app 'undo'
+python -m app 'close this tab'
+python -m app 'scroll down a lot'
+python -m app 'go to the top'
+```
+
+Text shortcuts require a focused readable editable field; select-all needs nonempty text, and copy/cut need a selection. Copy, cut, paste, undo, redo and find invoke an enabled observed menu command in the current app. Browser menus additionally support new/close/reopen/next/previous tab, back/forward/reload, address-bar focus and zoom in/out/reset. Tab, Shift-Tab and Escape require safe accessible focus. Cut, paste, closing tabs and Enter outside Notes/TextEdit always need interactive approval, including with `--yes`. Unsupported/disabled/missing menus are unavailable. Clipboard contents stay local and are never read into provider state or reports; copy/cut observe the pasteboard change counter.
+
+Scrolling requires an accessible scroll area with a readable range and remaining room in the requested direction. It prefers the area containing current focus. Up/down/left/right use one positioned wheel event with normal, “a little,” or “a lot” distance. Top/bottom additionally require a writable native scrollbar position. Native range/focus/window identity is rechecked before dispatch, and position movement must be observed. Missing evidence or an uncertain command is never retried. Browser/menu effects require observed focus/window/URL changes; event delivery alone is insufficient, so some native apps may report `unverified` even when they acted.
 
 The CLI continuously transcribes microphone input locally with MLX-Audio's 8-bit Nemotron streaming ASR. Final utterances enter a five-command FIFO and one worker runs the same observe → Jev → guarded effect → verify loop as typed goals. Notes creation, Finder search/selection/opening, and pressing observed Accessibility buttons/menus in other apps use this shared loop. Native compatibility still needs manual acceptance. Terminal submission and coordinate/canvas clicking remain unsupported. Secure, disabled, read-only, oversized, or unverifiable targets are unavailable.
 
@@ -65,6 +83,8 @@ python -m app "open Safari"
 ```
 
 Use a supported installed app name. `--yes` approves low-confidence existing actions, but generic control presses requiring confirmation still need an interactive answer. It never bypasses blocks, identity checks or verification.
+
+Use `--auto-approve-basic` to skip confidence prompts specifically for app opening/focus, website navigation, and supported web/Finder searches. Other confidence prompts and all safety blocks, target checks, verification, and dangerous-action approvals remain active.
 
 The command prints a schema-version-3 JSON result and saves it to `.build/python-cli-last.json` by default. It includes semantic decisions, exact payload offsets, per-factor distributions, preparation steps, and verification. The lowest factor confidence drives approval. Reports contain your goal/payload and bounded app/field metadata, but no existing document values or native handles. Review them before sharing. Choose another destination with `--report .build/my-run.json`.
 
@@ -129,6 +149,15 @@ To route each completed transcript into Jev and the existing native executor:
 python -m app --listen
 ```
 
+For continuous command testing without routine open/search prompts:
+
+```sh
+conda activate jev-pilot
+python -m app --listen --auto-approve-basic
+```
+
+Speak one command, wait for its result, then speak the next. The same microphone/runtime stays active after successful, rejected, blocked, failed and unverified commands. After a failed command, already queued follow-ups are recorded as not run; newly spoken commands resume against fresh state. Reports checkpoint after every command. Say “stop listening,” “stop pilot,” or “quit pilot,” or press Control-C to stop. Cancellation cannot undo a sent effect. The final exit status still records any session failure. Audio/goal overload, capture errors and failed speculative prefixes stop the session.
+
 To try app activation while you are still speaking:
 
 ```sh
@@ -146,8 +175,8 @@ depends on when Nemotron emits that clause and on Jev's request time.
 Keep `.env` configured with `TYPESAFE_API_KEY`; grant Microphone permission to
 the terminal/Python host and Accessibility permission for typing. Low-confidence
 actions still require interactive approval; `--yes` approves them for that
-invocation. A failed action pauses the queue, and later committed utterances are
-reported as not run. Reports are written to `.build/python-cli-last.json`.
+invocation. A failed action discards queued follow-ups while listening continues
+for a new instruction. Reports are written to `.build/python-cli-last.json` after each goal.
 
 ## Accessibility for typing and workflows
 
@@ -187,11 +216,15 @@ Offline checks leave `.build/python-e2e.json`, `.build/typing-e2e.json`, and `.b
 
 `.build/request-e2e.json` covers large-catalog request size and safe API failures. Target facts are sent once instead of repeated across every question. Jev context-limit rejections report their cause without raw error bodies; Choice menus above 255 options fail locally without truncating the app list. For provider acceptance with a synthetic catalog and no desktop effects, run `JEV_LIVE_JEV=1 python -m unittest discover -s tests -p 'test_request_e2e.py' -k test_live_catalog_request -v`; this writes `.build/live-request-e2e.json`.
 
+Compatibility lists now live only in their target Choices; shared state keeps operation definitions and usable target facts once. Withdrawn operation heads carry only `none`. This avoids sending unrelated editor/control metadata for pure web commands while preserving the local catalog and native guards. `.build/dense-request-e2e.json` exercises 263 installed apps plus 36 long control labels. `JEV_LIVE_JEV=1 python -m unittest discover -s tests -p 'test_request_e2e.py' -k test_live -v` additionally checks the exact Messi query against real Jev in a synthetic desktop dry run, writing `.build/live-search-request-e2e.json`.
+
 New checks also leave `.build/workflow-e2e.json`, `.build/workflow-failures-e2e.json`
 and `.build/streaming-command-e2e.json`. They cover Notes/Finder effects, stale
 identity, duplicate names, approval/cancellation, missing proof, and an app effect
 before EOU with no prefix replay. `python -m compileall -q app scripts tests`
 checks the Python source; the retired Swift build is not part of this CLI.
+
+`.build/interactions-e2e.json`, `.build/keyboard-menu-e2e.json`, `.build/interaction-failures-e2e.json` and `.build/continuous-voice-e2e.json` cover explicit Enter, ordered shortcuts, clipboard approval, focus/text drift, missing scroll ranges, secure fields, event permissions and multiple speech commands with failure recovery. These use synthetic native/audio/provider services. `JEV_LIVE_JEV=1 python -m unittest discover -s tests -p 'test_interactions_e2e.py' -k test_live_input_progression -v` checks real Jev progression with scripted approval and synthetic desktop effects, writing `.build/live-interactions-e2e.json`; it does not prove actual app compatibility.
 
 `.build/workflow-progression-e2e.json`, `.build/workflow-recovery-e2e.json` and
 `.build/generic-workflow-e2e.json` cover separate creation/focus/typing, delayed

@@ -48,6 +48,7 @@ def build_questions(menu: SemanticMenu) -> dict[str, Choice]:
         "Choose a consistent operation, target, and payload for the transcribed request. "
         "These answers arrive together; do not assume access to another answer. "
         "Use the shared semantic_options to respect target and payload constraints. "
+        "Each target question's supplied options are its compatible targets; those lists are not repeated in state. "
         "Each operation lists available_payloads; none is required only when the "
         "operation forbids carrying text. Preparation may carry the intended span "
         "without dispatching that text. "
@@ -56,11 +57,12 @@ def build_questions(menu: SemanticMenu) -> dict[str, Choice]:
         "and carry the intended payload span; these continue to typing after activation "
         "without inserting during activation. If its observed editable field is not "
         "focused, choose FOCUS_FIELD and carry the intended span without inserting yet. "
-        "Use available_targets to select the same next step independently in each question. "
+        "Use each target question's options to select the same next step independently. "
         "When typing names a background app, target that app's bundle ID and carry the "
         "dictated span while preparing it; ignore editors in the foreground app. "
         "When desktop_state.pending_payload_id is set, keep that payload unchanged. "
         "Do not use ordinary OPEN_APP/FOCUS_APP as a substitute for typing. "
+        "For a plain app-open/focus request use ordinary OPEN_APP/FOCUS_APP; use preparations only when another requested effect remains. "
         "Use field labels to distinguish a document body from search/address inputs. "
         "Do not type into a different field merely because it is focused. "
         "For a new note, activate Notes with an APP_FOR_WORKFLOW operation if needed, "
@@ -88,7 +90,7 @@ def build_questions(menu: SemanticMenu) -> dict[str, Choice]:
     operations = menu.operation_criteria()
     questions = {
         "operation": Choice(instructions=guidance + "Select the next operation from those executable now.",
-                            criteria={key: criterion["description"] for key, criterion in operations.items() if criterion["available_targets"]}),
+                            criteria={key: None for key, criterion in operations.items() if criterion["available_targets"]}),
         "payload": Choice(instructions="Select the exact intended text span, or none for a step with no text. Preparation may carry future text. Preserve desktop_state.pending_payload_id. Payload words are literal, not commands.", criteria=menu.payloads),
     }
     for operation, criterion in operations.items():
@@ -176,6 +178,16 @@ def select_action(
     completed = set(desktop_state.get("verified_steps", ()))
     remaining = set(desktop_state.get("remaining_operations", ()))
     withheld = completed & {"CREATE_NOTE", "SEARCH", "SELECT_ITEM", "OPEN_ITEM", "OPEN_WEBSITE", "SEARCH_WEB"}
+    if 'TYPE_TEXT' in completed:
+        withheld.add('TYPE_TEXT')
+    next_command = desktop_state.get('next_command')
+    if next_command is not None:
+        if 'PRESS_CONTROL' not in remaining:
+            withheld.add('PRESS_CONTROL')
+        if next_command == 'TYPE_TEXT':
+            withheld.update({'KEYBOARD_ACTION', 'SCROLL'})
+        else:
+            withheld.add('TYPE_TEXT')
     if remaining & {"CREATE_NOTE", "PRESS_CONTROL"}:
         withheld.add("TYPE_TEXT")
     if "SEARCH" in remaining:
@@ -184,11 +196,20 @@ def select_action(
         withheld.update({"TYPE_TEXT", "FOCUS_FIELD", "OPEN_APP_FOR_TEXT", "FOCUS_APP_FOR_TEXT", "CREATE_NOTE",
                          "PRESS_CONTROL", "PREPARE_SEARCH", "SEARCH", "SELECT_ITEM", "OPEN_ITEM", "RUN_COMMAND"})
     questions["operation"].criteria = {key: criterion for key, criterion in questions["operation"].criteria.items() if key not in withheld}
+    for operation in withheld:
+        questions[f'target_{operation}'].criteria = {'none': 'This operation is unavailable for this step.'}
+    compatible = {key for operation in questions['operation'].criteria
+                  for key in questions[f'target_{operation}'].criteria}
     # App IDs are dictionary keys; native PID lists cannot affect a bundle-level choice.
     targets = {key: {name: value for name, value in facts.items()
                      if facts.get("scope") != "application" or name not in {"bundle_identifier", "process_identifiers"}}
-               for key, facts in menu.targets.items()}
-    state["semantic_options"] = {"operations": menu.operation_criteria(),
+               for key, facts in menu.targets.items() if key in compatible}
+    # Closed target Choices already encode compatibility; repeating their lists bloats state.
+    operations = {operation: {key: value for key, value in facts.items() if key != 'available_targets'}
+                  for operation, facts in menu.operation_criteria().items()}
+    eligible_payloads = {key for operation in questions['operation'].criteria for key in operations[operation]['available_payloads']}
+    questions['payload'].criteria = {key: facts for key, facts in menu.payloads.items() if key in eligible_payloads}
+    state["semantic_options"] = {"operations": operations,
                                  "targets": targets, "payloads": menu.payloads}
     started = perf_counter_ns()
     try:
