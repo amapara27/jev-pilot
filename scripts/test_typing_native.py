@@ -98,7 +98,7 @@ class FixtureChoice:
     """Script each necessary action from fresh menus; do not preselect an editor."""
 
     def system_one(self, state, questions, *, model=None):
-        targets = questions["target"].criteria
+        targets = state["semantic_options"]["targets"]
         app = targets.get(TEXTEDIT)
         selected = {"operation": "STOP", "target": "none", "payload": "none"}
         if app and not app["active"]:
@@ -112,11 +112,12 @@ class FixtureChoice:
                     selected = {"operation": "TYPE_TEXT", "target": key, "payload": "span_0"}
                 elif facts["focusable"] and not facts["focused"]:
                     selected = {"operation": "FOCUS_FIELD", "target": key, "payload": "span_0"}
-        answers = {
-            name: SimpleNamespace(choice=selected[name], confidence=1.0,
-                                  probabilities={key: float(key == selected[name]) for key in question.criteria})
-            for name, question in questions.items()
-        }
+        answers = {}
+        for name, question in questions.items():
+            choice = (selected[name] if name in selected else selected["target"]
+                      if name == f"target_{selected['operation']}" else next(iter(question.criteria)))
+            answers[name] = SimpleNamespace(choice=choice, confidence=1.0,
+                                            probabilities={key: float(key == choice) for key in question.criteria})
         return SimpleNamespace(choices=answers, model="scripted-native-fixture", usage=None, request_id=None)
 
 

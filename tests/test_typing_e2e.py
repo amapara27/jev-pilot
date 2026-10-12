@@ -22,6 +22,17 @@ from app.text_input import NativeText
 BUNDLE = "com.apple.TextEdit"
 
 
+def choice_answers(questions, selected, confidence):
+    """Fake all speculative heads; the chosen operation receives the scripted target."""
+
+    answers = {}
+    for name, question in questions.items():
+        choice = (selected[name] if name in selected else selected["target"]
+                  if name == f"target_{selected['operation']}" else next(iter(question.criteria)))
+        answers[name] = SimpleNamespace(choice=choice, probabilities={key: float(key == choice) for key in question.criteria}, confidence=confidence)
+    return answers
+
+
 class Node:
     """Represent a native AX identity separately from its mutable attributes."""
 
@@ -66,6 +77,9 @@ class NativeAX:
 
     def AXUIElementIsAttributeSettable(self, node, attribute, unused):
         return 0, attribute in node.writable
+
+    def AXUIElementCopyActionNames(self, node, unused):
+        return 0, []
 
     def AXValueGetValue(self, value, kind, unused):
         return True, value
@@ -167,11 +181,12 @@ class Jev:
         self.calls.append(state)
         operation, target, payload = self.plan[min(index, len(self.plan) - 1)]
         if target == "editor":
-            target = next((key for key, facts in questions["target"].criteria.items() if isinstance(facts, dict) and facts.get("scope") == "field"), "missing_editor")
+            target = next((key for key, facts in questions[f"target_{operation}"].criteria.items() if isinstance(facts, dict) and facts.get("scope") == "field"), "missing_editor")
         selections = {"operation": operation, "target": target, "payload": payload}
-        answers = {name: SimpleNamespace(choice=selections[name], probabilities={key: float(key == selections[name]) for key in question.criteria}, confidence=self.confidence) for name, question in questions.items()}
+        answers = choice_answers(questions, selections, self.confidence)
         if self.mutate_answers:
-            self.mutate_answers(index, answers)
+            relevant = {"operation": answers["operation"], "target": answers[f"target_{operation}"], "payload": answers["payload"]}
+            self.mutate_answers(index, relevant)
         if self.after_call:
             self.after_call()
         return SimpleNamespace(choices=answers, model="offline", request_id="typing-test", usage=None)
@@ -438,9 +453,16 @@ class TypingPipelineTests(unittest.TestCase):
             self.assertEqual(opening[3].activation_count, 1)
             self.assertEqual(len(opening[1].effects), 1)
 
-            # An independent target factor can name the app for TYPE_TEXT even
-            # with an observed editor. Require a new Jev field choice, never a
-            # locally guessed insertion, including an unfocused document body.
+            opening = setup()
+            opening[3].bundle = "com.apple.Safari"
+            report = run("ordinary_open_cannot_finish_pending_typing", opening, goal='open TextEdit and type "hello 🦊"',
+                         client=Jev(plan=[("OPEN_APP", BUNDLE, "none"), ("TYPE_TEXT", "editor", "span_0")]))
+            self.assertEqual(report["outcome"], "completed")
+            self.assertEqual(len(report["steps"]), 2)
+            self.assertEqual(opening[1].editor.attrs["AXValue"], "before hello 🦊")
+
+            # Operation-specific heads exclude apps from typing. Reject a bad
+            # target immediately; a new invocation must choose the actual field.
             for bundle in (BUNDLE, "com.apple.Notes"):
                 for focused in (True, False):
                     result = setup(bundle=bundle, focused=focused)
@@ -451,25 +473,26 @@ class TypingPipelineTests(unittest.TestCase):
                     plan.append(("TYPE_TEXT", "editor", "span_0"))
                     client = Jev(plan=plan)
                     report = run(f"app_target_to_field_{bundle}_{focused}", result, client=client)
-                    self.assertEqual(report["outcome"], "completed")
-                    self.assertFalse(report["steps"][0]["effect_sent"])
-                    self.assertEqual(result[1].editor.attrs["AXValue"], "before hello 🦊")
+                    self.assertEqual(report["outcome"], "failed")
+                    self.assertFalse(report["effect_sent"])
+                    self.assertEqual(result[1].effects, [])
+                    self.assertEqual(result[1].editor.attrs["AXValue"], "before ")
                     self.assertEqual(result[3].activation_count, 0)
-                    self.assertEqual(len(client.calls), len(plan))
-                    targets = client.calls[1]["semantic_options"]["targets"]
-                    self.assertEqual(set(targets), {"none", "field_0"})
-                    self.assertEqual(client.calls[1]["desktop_state"]["pending_payload_id"], "span_0")
+                    self.assertEqual(len(client.calls), 1)
+                    valid_plan = plan[1:]
+                    client = Jev(plan=valid_plan)
+                    report = run(f"scoped_field_{bundle}_{focused}", result, client=client)
+                    self.assertEqual(report["outcome"], "completed")
+                    self.assertEqual(result[1].editor.attrs["AXValue"], "before hello 🦊")
 
             result = setup(focused=False)
             result[3].bundle = "com.apple.Safari"
             client = Jev(plan=[("OPEN_APP_FOR_TEXT", BUNDLE, "span_0"),
-                               ("TYPE_TEXT", BUNDLE, "span_0"),
                                ("FOCUS_FIELD", "editor", "span_0"),
                                ("TYPE_TEXT", "editor", "span_0")])
             report = run("open_app_target_focus_type", result, client=client)
             self.assertEqual(report["outcome"], "completed")
-            self.assertEqual(len(report["steps"]), 4)
-            self.assertFalse(report["steps"][1]["effect_sent"])
+            self.assertEqual(len(report["steps"]), 3)
             self.assertEqual(result[3].activation_count, 1)
             self.assertEqual(result[1].effects, [("AXFocused", True), ("AXSelectedText", "hello 🦊")])
 
@@ -482,8 +505,8 @@ class TypingPipelineTests(unittest.TestCase):
                 result = setup()
                 client = Jev(plan=[("TYPE_TEXT", BUNDLE, "span_0"), second])
                 report = run(name, result, goal='type "hello" rather than "goodbye"', client=client, options=options)
-                self.assertIn(report["outcome"], {"failed", "incomplete", "dry_run"})
-                self.assertEqual(len(client.calls), 2)
+                self.assertEqual(report["outcome"], "failed")
+                self.assertEqual(len(client.calls), 1)
                 self.assertFalse(report["effect_sent"])
                 self.assertEqual(result[1].effects, [])
                 self.assertEqual(result[2].events, [])
@@ -491,7 +514,7 @@ class TypingPipelineTests(unittest.TestCase):
             other_app = setup()
             report = run("app_target_cannot_use_other_app_field", other_app,
                          client=Jev(plan=[("TYPE_TEXT", "com.apple.Safari", "span_0")]))
-            self.assertEqual(report["outcome"], "unsupported")
+            self.assertEqual(report["outcome"], "failed")
             self.assertEqual(other_app[1].effects, [])
 
             switched = setup()
@@ -499,7 +522,7 @@ class TypingPipelineTests(unittest.TestCase):
             def switch_after_app_choice():
                 switched[3].bundle = "com.apple.Safari"
 
-            client = Jev(plan=[("TYPE_TEXT", BUNDLE, "span_0"), ("TYPE_TEXT", "editor", "span_0")],
+            client = Jev(plan=[("TYPE_TEXT", "editor", "span_0")],
                          after_call=switch_after_app_choice)
             report = run("app_switch_before_field_correction", switched, client=client)
             self.assertEqual(report["outcome"], "failed")
@@ -558,7 +581,7 @@ class TypingPipelineTests(unittest.TestCase):
             incompatible = setup()
             report = run("rejected_factor_diagnostics", incompatible, client=Jev(plan=[("FOCUS_APP", BUNDLE, "span_0")]))
             self.assertEqual(report["outcome"], "failed")
-            self.assertEqual(report["rejected_decision"]["choices"], {"operation": "FOCUS_APP", "target": BUNDLE, "payload": "span_0"})
+            self.assertEqual(report["rejected_decision"]["factor"], "operation")
             self.assertEqual(incompatible[1].effects, [])
 
             missing_body = setup(bundle="com.apple.Notes")
@@ -566,9 +589,8 @@ class TypingPipelineTests(unittest.TestCase):
             missing_body[1].editor.writable.clear()
             missing_body[1].editor.attrs["AXEditable"] = False
             report = run("notes_no_editable_body", missing_body, goal='type "hello 🦊" in Notes', client=Jev(plan=[("TYPE_TEXT", "com.apple.Notes", "span_0")]))
-            self.assertEqual(report["outcome"], "unsupported")
-            self.assertIsNone(report["decision"]["selected_candidate"])
-            self.assertIn("No editable field was discovered in Notes", report["reason"])
+            self.assertEqual(report["outcome"], "failed")
+            self.assertEqual(report["rejected_decision"]["factor"], "operation")
             self.assertEqual(report["editor_readiness"]["field_count"], 0)
             self.assertEqual(missing_body[1].effects, [])
 
@@ -581,7 +603,7 @@ class TypingPipelineTests(unittest.TestCase):
                 def rounded(index, answers):
                     if index != 1:
                         return
-                    answer = answers["target"]
+                    answer = answers["payload"]
                     answer.probabilities[answer.choice] = min(total, 1.0)
                     if total > 1:
                         answer.probabilities["none"] = total - 1
@@ -590,15 +612,15 @@ class TypingPipelineTests(unittest.TestCase):
                 report = run(f"probability_total_{total}", result, client=client)
                 if 0.99 <= total <= 1.01:
                     self.assertEqual(report["outcome"], "completed")
-                    diagnostics = report["decision"]["probability_validation"]["target"]
+                    diagnostics = report["decision"]["probability_validation"]["payload"]
                     self.assertAlmostEqual(diagnostics["raw_total"], total)
                     self.assertTrue(diagnostics["normalized"])
-                    self.assertAlmostEqual(sum(report["decision"]["probabilities"]["target"].values()), 1)
+                    self.assertAlmostEqual(sum(report["decision"]["probabilities"]["payload"].values()), 1)
                     self.assertEqual(report["decision"]["confidence"], 0.99)
                 else:
                     self.assertEqual(report["outcome"], "failed")
-                    self.assertEqual(report["rejected_decision"]["factor"], "target")
-                    self.assertAlmostEqual(report["rejected_decision"]["probability_validation"]["target"]["raw_total"], total)
+                    self.assertEqual(report["rejected_decision"]["factor"], "payload")
+                    self.assertAlmostEqual(report["rejected_decision"]["probability_validation"]["payload"]["raw_total"], total)
                     self.assertEqual(result[1].effects, [("AXFocused", True)])
                     self.assertEqual(result[2].events, [])
 

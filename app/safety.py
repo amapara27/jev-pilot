@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from .models import ActionCandidate
 
@@ -24,6 +26,20 @@ def disposition(action: ActionCandidate, confidence: float) -> str:
 
     if action.kind == "STOP":
         return "deny"
-    if action.kind not in {"OPEN_APP", "FOCUS_APP", "FOCUS_FIELD", "TYPE_TEXT"}:
+    if action.kind == "PRESS_CONTROL":
+        label = action.parameters.get("label", "")
+        if blocked_goal(label) or action.parameters.get("bundle_identifier") == "com.apple.Terminal":
+            return "deny"
+        routine = label.casefold().strip(".…") in {"new", "new document", "new window", "new tab", "find", "search", "back", "next", "cancel", "preferences", "settings"}
+        return "allow" if routine and confidence >= 0.82 else "confirm"
+    if action.kind == "SEARCH" and (not action.parameters.get("text") or len(action.parameters["text"]) > 4096 or any(ord(c) < 32 or c in "\u2028\u2029" for c in action.parameters["text"])):
         return "deny"
+    if action.kind == "OPEN_ITEM":
+        path = Path(unquote(urlparse(action.parameters.get("url", "")).path))
+        if path.suffix.casefold() in {".app", ".command", ".sh", ".workflow", ".scpt", ".scptd", ".pkg", ".dmg", ".webloc", ".url"}:
+            return "deny"
+    if action.kind not in {"OPEN_APP", "FOCUS_APP", "FOCUS_FIELD", "TYPE_TEXT", "CREATE_NOTE", "PREPARE_SEARCH", "SEARCH", "SELECT_ITEM", "OPEN_ITEM"}:
+        return "deny"
+    if action.kind in {"CREATE_NOTE", "SEARCH", "SELECT_ITEM", "OPEN_ITEM"}:
+        return "allow" if confidence >= 0.82 else "confirm"
     return "allow" if confidence >= 0.65 else "confirm"

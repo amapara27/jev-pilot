@@ -14,16 +14,28 @@ OPERATIONS = {
     "FOCUS_APP": "Focus a running app that is not frontmost; no payload.",
     "OPEN_APP_FOR_TEXT": "Typing prerequisite: open a nonrunning app, then observe editors. Carry the intended text span (or none); do not insert yet.",
     "FOCUS_APP_FOR_TEXT": "Typing prerequisite: focus a running background app, then observe editors. Carry the intended text span (or none); do not insert yet.",
+    "OPEN_APP_FOR_WORKFLOW": "Open a nonrunning app before a multi-step workflow. Carry the future text/query span (or none); do not insert yet.",
+    "FOCUS_APP_FOR_WORKFLOW": "Focus a running background app before a multi-step workflow. Carry the future text/query span (or none); do not insert yet.",
     "FOCUS_FIELD": "Typing prerequisite: focus an observed focusable editable field that is not focused. Carry the intended span (or none); do not insert yet.",
     "TYPE_TEXT": "Insert an exact text span into a focused field with can_type=true, without submission. App-level targets cannot execute insertion.",
-    "SEARCH": "Search within a grounded app for an exact text span. Not executable yet.",
-    "CREATE_NOTE": "Create a new note in Notes; no payload. Not executable yet.",
+    "PREPARE_SEARCH": "Activate Finder's observed Find menu to expose a search query field. Carry the query span (or none); do not enter it yet.",
+    "SEARCH": "Set Finder's observed search query to an exact text span. Never type a search into a document.",
+    "CREATE_NOTE": "Press Notes' uniquely observed New Note control. Carry the future typing span (or none), without insertion. Observe the new empty body before typing.",
+    "PRESS_CONTROL": "Press an observed accessible button/menu in any app to advance the workflow. Carry future text (or none), without insertion. Verify a concrete control, editor or document change, then observe again.",
+    "SELECT_ITEM": "Select one visible, uniquely named Finder item with an exact local file URL; no payload.",
+    "OPEN_ITEM": "Open an already selected, uniquely named Finder item through its observed Open menu; no payload.",
     "RUN_COMMAND": "Explicitly submit a command in Terminal, distinct from typing. Not executable yet.",
     "STOP": "No action advances the request or it is already complete; target and payload must be none.",
     "UNSUPPORTED": "The requested operation is outside this menu, such as clicking; target and payload must be none.",
 }
 MAX_GOAL_CHARACTERS = 8192
 MAX_PAYLOAD_SPANS = 16
+# A carried span preserves later intent; only TYPE_TEXT/SEARCH dispatch its text.
+PREPARATION_OPERATIONS = {
+    "OPEN_APP_FOR_TEXT", "FOCUS_APP_FOR_TEXT", "OPEN_APP_FOR_WORKFLOW",
+    "FOCUS_APP_FOR_WORKFLOW", "FOCUS_FIELD", "CREATE_NOTE", "PREPARE_SEARCH",
+    "PRESS_CONTROL",
+}
 
 
 class SemanticError(ValueError):
@@ -41,24 +53,32 @@ class SemanticMenu:
     def resolve(
         self, operation: str, target_id: str, payload_id: str
     ) -> tuple[dict[str, JSONValue], ActionCandidate | None]:
-        """Check compatibility before materializing an executable app activation."""
+        """Check compatibility before materializing one grounded native effect."""
 
         target, payload = self.targets[target_id], self.payloads[payload_id]
         if operation in {"STOP", "UNSUPPORTED"}:
             valid = target_id == payload_id == "none"
-        elif operation in {"OPEN_APP", "FOCUS_APP", "OPEN_APP_FOR_TEXT", "FOCUS_APP_FOR_TEXT"}:
+        elif operation in {"OPEN_APP", "FOCUS_APP", "OPEN_APP_FOR_TEXT", "FOCUS_APP_FOR_TEXT", "OPEN_APP_FOR_WORKFLOW", "FOCUS_APP_FOR_WORKFLOW"}:
             valid = target.get("scope") == "application" and not target["active"]
-            valid = valid and (operation.endswith("_FOR_TEXT") or payload_id == "none")
+            valid = valid and (operation in PREPARATION_OPERATIONS or payload_id == "none")
             valid = valid and bool(target["running"]) == operation.startswith("FOCUS_APP")
         elif operation == "FOCUS_FIELD":
             valid = target.get("scope") == "field"
             valid = valid and target["focusable"] and not target["focused"]
         elif operation == "TYPE_TEXT":
-            valid = target_id != "none" and payload_id != "none"
-            if target.get("scope") == "field":
-                valid = valid and target["can_type"]
+            valid = target.get("scope") == "field" and payload_id != "none" and target["can_type"]
         elif operation == "CREATE_NOTE":
-            valid = target_id == "com.apple.Notes" and payload_id == "none"
+            valid = target_id == "com.apple.Notes"
+        elif operation == "PRESS_CONTROL":
+            valid = target.get("scope") == "control"
+        elif operation == "PREPARE_SEARCH":
+            valid = target_id == "com.apple.finder"
+        elif operation == "SEARCH":
+            valid = target.get("scope") == "application" and payload_id != "none"
+        elif operation in {"SELECT_ITEM", "OPEN_ITEM"}:
+            valid = target.get("scope") == "finder_item" and not target.get("ambiguous") and payload_id == "none"
+            if operation == "OPEN_ITEM":
+                valid = valid and target.get("selected") and target.get("sole_selected")
         else:
             valid = target_id != "none" and payload_id != "none"
             if operation == "RUN_COMMAND":
@@ -77,11 +97,16 @@ class SemanticMenu:
             "payload": payload,
         }
         action = None
-        if operation in {"OPEN_APP", "FOCUS_APP", "OPEN_APP_FOR_TEXT", "FOCUS_APP_FOR_TEXT"}:
+        if operation in {"OPEN_APP", "FOCUS_APP", "OPEN_APP_FOR_TEXT", "FOCUS_APP_FOR_TEXT", "OPEN_APP_FOR_WORKFLOW", "FOCUS_APP_FOR_WORKFLOW"}:
             kind = "FOCUS_APP" if operation.startswith("FOCUS_APP") else "OPEN_APP"
             parameters = {"bundle_identifier": target_id, "name": target["name"]}
             if operation.endswith("_FOR_TEXT"):
                 parameters["continue_typing"] = True
+            if operation.endswith("_FOR_WORKFLOW"):
+                parameters["continue_workflow"] = True
+            required = required_workflow_operations(self.goal)
+            if required:
+                parameters["continue_workflow" if required - {"TYPE_TEXT"} else "continue_typing"] = True
             action = ActionCandidate(
                 id=f"{operation}:{target_id}",
                 kind=kind,
@@ -99,6 +124,28 @@ class SemanticMenu:
                 id=f"{operation}:{target_id}", kind=operation, parameters=parameters,
                 description=f"{'Type exact text into' if operation == 'TYPE_TEXT' else 'Focus'} {target['label']}.",
             )
+        elif operation in {"CREATE_NOTE", "PREPARE_SEARCH", "SEARCH", "SELECT_ITEM", "OPEN_ITEM", "PRESS_CONTROL"}:
+            bundle = target.get("bundle_identifier")
+            controls = self.targets.get(bundle, {}).get("workflow_controls", {})
+            identifier = {"CREATE_NOTE": controls.get("new_note"), "PREPARE_SEARCH": controls.get("find"),
+                          "SEARCH": controls.get("query"), "SELECT_ITEM": target_id, "OPEN_ITEM": target_id, "PRESS_CONTROL": target_id}[operation]
+            if operation == "SEARCH" and bundle != "com.apple.finder":
+                identifier = None
+            if identifier and (operation != "OPEN_ITEM" or controls.get("open")):
+                parameters = {"bundle_identifier": bundle, "element_id": identifier}
+                if operation == "SEARCH":
+                    parameters["text"] = payload["text"]
+                if operation == "OPEN_ITEM":
+                    parameters.update(url=target["url"], open_control_id=controls["open"])
+                description = {"CREATE_NOTE": "Create a new note in Notes.", "PREPARE_SEARCH": "Prepare Finder search."}.get(operation)
+                if operation == "SEARCH":
+                    description = f"Search Finder for {payload['text']!r}."
+                if operation in {"SELECT_ITEM", "OPEN_ITEM"}:
+                    description = f"{'Select' if operation == 'SELECT_ITEM' else 'Open'} {target['label']!r} ({target['url']})."
+                if operation == "PRESS_CONTROL":
+                    parameters["label"] = target["label"]
+                    description = f"Press {target['label']!r} in the active app."
+                action = ActionCandidate(f"{operation}:{identifier}", operation, parameters, description)
         return semantic, action
 
     def operation_criteria(self) -> dict[str, dict[str, JSONValue]]:
@@ -115,9 +162,16 @@ class SemanticMenu:
                 except SemanticError:
                     continue
                 # App-level typing is describable but is never an executable next step.
-                if operation != "TYPE_TEXT" or action is not None:
+                if operation not in {"TYPE_TEXT", "CREATE_NOTE", "PREPARE_SEARCH", "SEARCH", "SELECT_ITEM", "OPEN_ITEM"} or action is not None:
                     targets.append(identifier)
-            criteria[operation] = {"description": description, "available_targets": targets}
+            if operation in PREPARATION_OPERATIONS:
+                payload_ids = list(self.payloads)
+            elif operation in {"TYPE_TEXT", "SEARCH", "RUN_COMMAND"}:
+                payload_ids = [key for key in self.payloads if key != "none"]
+            else:
+                payload_ids = ["none"]
+            criteria[operation] = {"description": description, "available_targets": targets,
+                                   "available_payloads": payload_ids}
         return criteria
 
 
@@ -142,7 +196,7 @@ def extract_payloads(goal: str) -> dict[str, dict[str, JSONValue]]:
         add(match.start() + 1, match.end() - 1)
     # ponytail: narrow English span proposals; add forms when real workflows need them.
     verbs = re.finditer(
-        r"\b(?:type(?:\s+command)?|write|dictate|insert|search(?:\s+for)?|find|locate|run(?:\s+command)?)\s+",
+        r"\b(?:type(?:\s+command)?|write|dictate|insert|(?:search|find|locate)(?:\s+(?:in\s+)?Finder)?(?:\s+for)?|run(?:\s+command)?)\s+",
         goal,
         re.IGNORECASE,
     )
@@ -166,3 +220,26 @@ def extract_payloads(goal: str) -> dict[str, dict[str, JSONValue]]:
             for index, (start, end) in enumerate(spans)
         },
     }
+
+
+def required_workflow_operations(goal: str) -> set[str]:
+    """Recognize supported completion requirements while shielding quoted/typed text."""
+
+    command = re.sub(r'"(?:\\.|[^"\\])*"|“[^”]*”|(?<!\w)\x27[^\x27]*\x27(?!\w)', ' PAYLOAD ', goal).casefold()
+    typing = re.search(r"\b(?:type|write|dictate|insert)\s+", command)
+    required = {"TYPE_TEXT"} if typing else set()
+    if "in a new note" in command:
+        required.add("CREATE_NOTE")
+    if typing:
+        command = command[:typing.start()]
+    if re.search(r"\b(?:(?:create|make|start)\s+(?:a\s+)?(?:new\s+)?note|open\s+(?:a\s+)?new\s+note)\b", command):
+        required.add("CREATE_NOTE")
+    if re.search(r"\b(?:click|press|choose)\b|\b(?:create|make|open)\s+(?:a\s+)?new\s+(?:document|window|tab)\b", command):
+        required.add("PRESS_CONTROL")
+    if re.search(r"\b(?:search|find|locate)\b", command):
+        required.add("SEARCH")
+    if re.search(r"\bselect\b", command):
+        required.add("SELECT_ITEM")
+    if re.search(r"\bopen\s+(?:it|this|that|the\s+(?:file|result)|[\w.-]+\.[a-z0-9]+)\b", command):
+        required.add("OPEN_ITEM")
+    return required

@@ -1,8 +1,8 @@
 # Jev Pilot architecture
 
-The active runtime is `python -m app`: text goals, one factorized Jev request per
-step, bounded typing preparation, native app/editor effects, and verified reports.
-Swift sources are retired references, not a fallback runtime.
+The active runtime is `python -m app`: typed goals or continuous local Nemotron
+speech, one factorized Jev request per step, bounded typing preparation, native
+app/editor effects, and verified reports. Swift sources are retired references.
 
 ```text
 goal → sensitive-goal block → native app + bounded AX editor snapshot
@@ -10,8 +10,12 @@ goal → sensitive-goal block → native app + bounded AX editor snapshot
   → one Jev request: operation / target / payload
   → validate each distribution and the combination
   → fresh identity/text/caret check → local safety / approval → fresh check
-  → native activation / field focus / exact insertion → outcome verification
-  → continue only for explicit typing prerequisites, at most four steps
+  → native activation / control press / field focus / insertion → outcome verification
+  → action history → fresh observation (four typing steps / eight workflow steps)
+
+voice: microphone callback → bounded ordered PCM queue → Nemotron streaming session
+  → partial display + optional stable app clause → silence-based EOU suffix → bounded FIFO
+  → one goal worker → the same run_goal path → Jev → guarded effect → verification
 ```
 
 ## Responsibilities
@@ -22,12 +26,15 @@ goal → sensitive-goal block → native app + bounded AX editor snapshot
 | `app/runtime.py` | Bounded preparation/insertion flow, fresh checks, safety, timings, reports. |
 | `app/desktop.py` | AppKit observation/activation, app/field menus, final native guard before dispatch. |
 | `app/text_input.py` | Bounded AX editor discovery, identity continuity, local document/caret facts, UTF-16 replacement, guarded text/focus dispatch. |
+| `app/workflows.py` | Bounded Notes/Finder controls, local file identity, guarded menu/query/selection effects. |
 | `app/semantics.py` | Operation vocabulary, exact goal spans, combination checks, local action resolution. |
-| `app/decision.py` | Three Choices in one TypeSafe call per step; strict response validation. |
+| `app/decision.py` | One TypeSafe call with operation, payload and speculative per-operation targets; validate only the chosen head. |
 | `app/models.py` | Executable actions and validated semantic decisions. |
 | `app/safety.py` | Sensitive-goal blocking and local confidence approval. |
 | `app/verification.py` | Verify foreground, focused identity, or exact resulting text/caret; never replay. |
 | `app/config.py` | Environment/`.env` keys parsed as data, excluded from reports. |
+| `app/speech_model.py` | Lazily load the pinned MLX-Audio Nemotron model from the local Hugging Face cache. |
+| `app/speech_runtime.py` | Capture mono audio, bound backlog, stream one decoder consumer, and commit final text at EOU. |
 
 ## Semantic authority and preparation
 
@@ -38,42 +45,102 @@ application targets cannot execute TYPE_TEXT. Local parsing proposes exact quote
 interiors and unquoted suffix boundaries, not the operation. Limits remain 8192
 goal characters and 16 span proposals; overflow fails before provider access.
 
-Each step sends operation/target/payload Choices with shared `semantic_options`.
-Operation criteria list their currently compatible targets; target criteria list
-available operations. This grounds independent answers in the same next-step
-constraints without locally classifying the user's operation.
-Every answer requires known IDs, exact probability keys, finite [0,1] values,
+Each step sends operation, payload and target_OPERATION Choices in one request.
+Targets are restricted to each operation's grounded candidates. Only the selected
+operation's target head authorizes input; unused answers are ignored, but the
+response must have exactly the requested head names. Shared semantic_options retains
+the full bounded menu. Schema-3 reports retain canonical operation/target/payload
+factors. Only currently available operations enter the operation Choice. Withdraw
+completed one-shot prerequisites and verified control IDs; withhold typing until
+required creation/control preparation verifies. After unique editor preparation,
+scope subsequent target menus to that field. Each consumed answer requires known IDs,
+exact probability keys, finite [0,1] values,
 total within 0.01 of one, valid confidence, and a maximum-probability winner.
 Normalize accepted totals to one without changing factor confidence. Record raw
 total/count/normalization per factor, including factor-specific rejection details.
 Minimum factor confidence drives approval; independent factors are not a joint
 probability. Incompatible choices reject the whole decision without fallback effects.
 
-OPEN_APP/FOCUS_APP retain their one-action behavior. Explicit
+OPEN_APP/FOCUS_APP are one-action only when no recognized effect remains. Explicit
 OPEN_APP_FOR_TEXT/FOCUS_APP_FOR_TEXT request activation followed by fresh editor
 observation; FOCUS_FIELD requests one native focus effect followed by another Jev
-choice. Typing prerequisites may carry an exact payload span without inserting
+choice. Typing and workflow prerequisites may carry an exact payload span without inserting
 it, or explicitly choose none. A carried span is bound to the preparation sequence
 and cannot change before insertion. TYPE_TEXT requires a focused field with a
 readable value and valid UTF-16 selection plus an exact span. App-level TYPE_TEXT
-can be described semantically but has no executable target. SEARCH/CREATE_NOTE/
-RUN_COMMAND remain unsupported. No executor submits commands or presses Return.
+is rejected, not corrected into an editor. Scoped SEARCH and
+CREATE_NOTE execute only with current native controls. RUN_COMMAND remains
+unsupported. No executor submits commands or presses Return.
 
-If Jev selects application-level TYPE_TEXT while that app is frontmost and has
-an observed typeable or focusable editor, record a `reselect_field` step with no
-effect. Bind its exact payload and ask Jev again using only that app's fresh field
-targets plus none. This consumes the same four-step budget; Jev must still choose
-FOCUS_FIELD when needed, then TYPE_TEXT. Never map the app directly to an editor.
-A changed foreground app, changed payload, missing usable editors, or repeated app
-ID cannot authorize insertion. Other incompatible choices still reject normally.
+OPEN/FOCUS_APP_FOR_WORKFLOW, CREATE_NOTE and PREPARE_SEARCH accept a carried future
+span, exactly like typing preparation; native parameters for those effects contain
+no text. Only TYPE_TEXT/SEARCH dispatch the payload. This fixes the observed live
+rejection of OPEN_APP_FOR_WORKFLOW + Notes + span_0. “Open a new note” establishes
+the same creation requirement as “create a new note”; quoted payloads are shielded.
+Recognized typing/Notes/Finder goals with AX trust false fail before Jev, reporting
+python_executable and permission instructions. Plain app activation still works
+without AX permission. Microphone permission alone does not authorize AX effects.
 
-There are at most four steps per run. Each prerequisite must verify before the
+Both continue_typing and continue_workflow activation must observe the selected
+foreground app and a usable focused Accessibility window. Verification polls
+within its existing three-second bound, returning immediately when ready. Persistent
+AX window errors stop preparation before the next provider request, with a specific
+readiness reason; the already-sent activation is not replayed. App-only activation
+still needs foreground alone. .build/workflow-readiness-e2e.json covers delayed
+window readiness, persistent -25204 errors and ordinary open/focus through the CLI.
+
+Jev receives the last eight compact action outcomes plus verified/remaining
+operations. A replaced pressable control in the same app/native window permits at
+most two fresh Jev choices before dispatch, within the normal step budget. Never
+inherit approval, recover text/caret/file/app drift, or replay a sent effect.
+
+Typing-only runs have at most four steps. Each prerequisite must verify before the
 next request; previous verified operations are provided to Jev. A completed
 insertion terminates the run immediately, preventing a second insertion. STOP
 after preparation reports incomplete, and exhausted preparation is incomplete.
 Completed preparation effects are never undone. Ordinary app activation does not
-finish a pending typing sequence. This is bounded typing preparation, not a general
-multi-command or Notes-creation workflow controller.
+finish pending typing. Recognized Notes/Finder workflows have eight steps, with
+required operations derived from supported command forms while shielding quoted
+and typed payloads. Jev chooses every step. A skipped creation/search prerequisite
+is withheld, STOP is incomplete, repeated workflow effects are denied, and one
+insertion terminates the run. These are scoped workflows, not general planning.
+
+## Notes and Finder controls
+
+`NativeWorkflows` scans the active accessible app, at most 256 nodes and one second,
+using visible children and CFEqual identity across adjacent observations. Exact
+English New Note, Find and Open menu controls require AXPress and availability;
+prefer a unique menu item to a redundant toolbar button. Changed selected-note
+identity with one writable body proves creation even before focus. Alternatively
+require a newly observed focused empty editor, or an empty body after nonempty
+baseline/window change. Bind subsequent focus/typing to that note/editor/window;
+the executor rechecks selected note identity. Require empty body/caret (0,0)
+before insertion. An indistinguishable old empty note pauses; creation is not replayed.
+
+The scanner also grounds AXPress buttons/menus in other accessible apps, deferring
+broad collections behind controls. PRESS_CONTROL verifies target selection/expansion,
+a new editor, or changed local document URL. AXPress success alone is not proof.
+Bind a uniquely prepared editor through focus/insertion; reject repeated control IDs.
+Routine labels need 82%; unknown labels require interactive approval even with
+--yes. Destructive labels and Terminal controls are denied. URL/filename-bearing
+controls cannot bypass scoped file operations. Control-only runs end on Jev STOP
+with verified_actions scope: observable effects, not arbitrary goal completion.
+
+Each dispatched step records bounded post-action reason/readiness, not values,
+carets or handles. Poll within three seconds, advance immediately on evidence and
+check cancellation each observation. All workflows use the same run_goal loop.
+
+SEARCH writes only an identified writable Finder query, capped at 4096 characters;
+it never rewrites a document. PREPARE_SEARCH exposes that field through Find.
+Query equality verifies query entry, not result readiness or opening. SELECT_ITEM
+requires a visible selectable item with a resolvable local URL. Deduplicate AX
+representations of one URL; disable distinct same-name files. OPEN_ITEM requires
+exactly one native collection selection and the current Open menu. File device/inode/size/mtime and
+native item/window identity must remain unchanged. Verify the destination's
+AXDocument/AXURL, including app changes. Missing identity or destination evidence
+pauses; there is no coordinate/path guessing or retry. Known executable/package/
+link extensions are blocked. New workflow effects require 82% confidence or
+approval; existing app/focus/typing keeps 65%.
 
 ## Native text boundary
 
@@ -130,8 +197,9 @@ operation names. Existing AX document values, selected text, and native handles
 stay local. Labels may themselves contain app-provided text. Schema-3 reports
 contain semantic decisions, exact dictated payloads, per-factor metadata, step
 outcomes, aggregate timings, and completion scope. `single_insertion` verifies
-one insertion; `selected_action` verifies an ordinary app activation. Neither
-claims arbitrary multi-command goal completion. Review reports before sharing.
+one insertion; `selected_action` verifies ordinary activation. `verified_workflow`
+requires every recognized Notes/Finder operation and records verified_operations.
+None claims arbitrary free-form goal completion. Review reports before sharing.
 Rejected combinations include validated choice IDs, factor confidences and
 distributions under `rejected_decision`, without raw provider bodies.
 `editor_readiness` reports focused-window AX error, field/insertion counts,
@@ -190,11 +258,57 @@ list traversal, not the cause of this editor’s absence. The user confirmed
 successful Notes typing after this fix on 2026-10-04. Formal native-harness and
 TextEdit acceptance remain pending; this tool’s Python host remains untrusted.
 
+## Continuous speech boundary
+
+Voice mode is opt-in (`--listen`); `--transcribe-only` exercises microphone and
+ASR without an API key, Jev request, Accessibility snapshot, or desktop effect.
+The ordinary positional text-goal route remains unchanged. The 8-bit Nemotron
+model is loaded lazily on Apple Silicon and its first use downloads to the
+standard Hugging Face cache; subsequent recognition is local. The runtime uses
+MLX-Audio's `create_streaming_session()` interface, not its separate speaker-
+diarization session.
+
+The PortAudio callback copies mono float32 frames into a bounded queue and does
+no model work. A single ordered consumer feeds audio and advances the decoder;
+partials are display-only by default. A small RMS gate commits an utterance after sustained
+silence, flushes one final result, and creates the next decoder session while
+capture continues. Input and goal queues are bounded; overflow is an explicit
+error, never silent data loss. Final transcripts enter a five-goal FIFO. One
+execution worker calls the existing `run_goal()` on the main/AppKit thread
+with transcript text only; desktop state is observed fresh when a queued goal
+starts. ASR decoding runs alongside it. A non-success outcome stops the
+worker and leaves later goals in the report as not run. Stop/Ctrl-C discards the
+current partial utterance and cancels the active run at its next pre-effect
+boundary; already-sent native effects cannot be undone.
+
+`--silence-ms` controls the local endpointing threshold. This is a latency/noise
+tradeoff, not a learned VAD. The Nemotron session uses its automatic language
+selection. The user reports live speech testing; quantified WER and latency remain
+separate acceptance evidence. Offline checks fake model/audio boundaries.
+
+`--listen --stream-prefixes` enables `StreamingCommands`: one explicit known-app
+opening/focusing clause followed by a connector must remain unchanged for 400 ms.
+It enters the same bounded FIFO before EOU; Jev may only select OPEN_APP/FOCUS_APP
+for that exact app (or STOP if already active). No partial typing or file opening.
+At EOU, remove only the exact committed prefix and connector and queue its exact
+suffix with intended app context. Re-observe that context at dequeue. A changed
+committed prefix/boundary stops capture and future effects; sent effects remain.
+Offline E2E proves early dispatch/deduplication, not real ASR prefix latency.
+
 ## Remaining roadmap
 
-Prove real app/editor compatibility after granting native permissions. Notes
-creation, Finder search/open-result workflows, Terminal submission, general
-multi-step goals, speech, queues, and streaming remain future work.
+Notes/Finder workflows and opt-in first app clauses are implemented with offline
+artifacts `.build/workflow-e2e.json`, `.build/workflow-failures-e2e.json`, and
+`.build/streaming-command-e2e.json`. Native acceptance on 2026-10-11 still fails
+before effects: this Codex Python host is not AX-trusted. Validate new controls
+from the user's permitted terminal. Terminal submission, richer app controls,
+general planning, broader streaming and measured latency remain future work.
+
+The user's subsequent voice report also has AX trust false. Routing regressions
+are covered by `.build/workflow-routing-regression.json` (typed/voice, open/focus,
+carried span through creation and one insertion) and
+`.build/workflow-routing-boundaries.json` (no-access preflight, payload drift and
+app-only execution without AX). These artifacts fake native/provider boundaries.
 
 User confirmation (2026-10-04): Notes typing worked after the AXEnabled
 attribute-unsupported compatibility fix. This establishes a successful user-run

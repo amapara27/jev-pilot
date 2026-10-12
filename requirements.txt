@@ -3,3 +3,4 @@ python-dotenv>=1.0,<2.0
 pyobjc-framework-Cocoa==12.2.2
 pyobjc-framework-ApplicationServices==12.2.2
 pyobjc-framework-Quartz==12.2.2
+mlx-audio[stt]==0.5.7

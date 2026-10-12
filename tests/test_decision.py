@@ -15,7 +15,7 @@ class Workspace:
     """Ground just Safari and Terminal as installed applications."""
 
     def URLForApplicationWithBundleIdentifier_(self, bundle_id):
-        return object() if bundle_id in {"com.apple.Safari", "com.apple.Terminal"} else None
+        return object() if bundle_id in {"com.apple.Safari", "com.apple.Terminal", "com.apple.finder"} else None
 
 
 class Client:
@@ -27,14 +27,17 @@ class Client:
         self.calls = []
 
     def system_one(self, state, questions, *, model=None):
+        from test_typing_e2e import choice_answers
         self.calls.append((state, questions, model))
         selected = {"operation": self.operation, "target": self.target, "payload": self.payload}
-        choices = {}
-        for name, question in questions.items():
-            key = selected[name]
-            choices[name] = SimpleNamespace(choice=key, probabilities={item: float(item == key) for item in question.criteria}, confidence=0.9)
+        choices = choice_answers(questions, selected, 0.9)
         if self.mutate:
-            self.mutate(choices)
+            heads = {"operation": "operation", "target": f"target_{self.operation}", "payload": "payload"}
+            relevant = {name: choices[head] for name, head in heads.items()}
+            self.mutate(relevant)
+            for name, head in heads.items():
+                if name not in relevant:
+                    choices.pop(head)
         return SimpleNamespace(choices=choices, model="offline", request_id="test", usage=SimpleNamespace(input_tokens=10, output_tokens=3))
 
 
@@ -44,23 +47,24 @@ class SemanticDecisionTests(unittest.TestCase):
     def setUp(self):
         self.desktop = MacDesktop.__new__(MacDesktop)
         self.desktop.workspace = Workspace()
-        self.state = DesktopState(AppState("Safari", "com.apple.Safari", 1), (AppState("Safari", "com.apple.Safari", 1), AppState("Terminal", "com.apple.Terminal", 2)), True, True)
+        self.state = DesktopState(AppState("Safari", "com.apple.Safari", 1), (AppState("Safari", "com.apple.Safari", 1), AppState("Terminal", "com.apple.Terminal", 2), AppState("Finder", "com.apple.finder", 3)), True, True)
 
     def choose(self, client, goal="Switch to Terminal"):
         return select_action(goal, self.state.provider_state(), self.desktop.semantic_menu(goal, self.state), client=client)
 
     def test_single_request_contains_all_operations_targets_and_exact_spans(self):
-        client = Client(operation="TYPE_TEXT", target="com.apple.Safari", payload="span_0")
+        client = Client(operation="FOCUS_APP_FOR_TEXT", target="com.apple.Terminal", payload="span_0")
         decision = self.choose(client, 'Type "Terminal and run 🦊  now!"')
-        self.assertIsNone(decision.selected_candidate)
+        self.assertEqual(decision.selected_candidate.kind, "FOCUS_APP")
         self.assertEqual(decision.semantic["payload"]["text"], "Terminal and run 🦊  now!")
         self.assertEqual(len(client.calls), 1)
         state, questions, _ = client.calls[0]
         self.assertEqual(state["semantic_options"]["payloads"], self.desktop.semantic_menu('Type "Terminal and run 🦊  now!"', self.state).payloads)
-        self.assertEqual(set(questions), {"operation", "target", "payload"})
+        self.assertIn("target_FOCUS_APP_FOR_TEXT", questions)
+        self.assertNotIn("target", questions)
         self.assertIn("RUN_COMMAND", questions["operation"].criteria)
         self.assertIn("UNSUPPORTED", questions["operation"].criteria)
-        self.assertIn("com.apple.Safari", questions["target"].criteria)
+        self.assertNotIn("com.apple.Safari", questions["target_TYPE_TEXT"].criteria)
 
     def test_each_factor_rejects_bad_answers(self):
         failures = {

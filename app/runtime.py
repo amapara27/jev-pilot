@@ -1,7 +1,9 @@
-"""Connect semantic choices to bounded app/field preparation and one verified insertion."""
+"""Run the shared observe/Jev/effect/verify loop for accessible desktop workflows."""
 
 from __future__ import annotations
 
+from threading import Event
+import sys
 from time import perf_counter
 from typing import Callable
 
@@ -10,8 +12,8 @@ from .config import ConfigurationError, load_api_key
 from .models import ActionCandidate
 from .desktop import DesktopError, DesktopState
 from .safety import blocked_goal, disposition
-from .verification import verify_action
-from .semantics import SemanticError, SemanticMenu
+from .verification import verify_action, editor_readiness, note_body, same_created_note
+from .semantics import SemanticError, SemanticMenu, PREPARATION_OPERATIONS, required_workflow_operations
 from .text_input import TextInputError
 
 
@@ -26,17 +28,28 @@ def run_goal(
     dry_run: bool = False,
     approve: Callable[[ActionCandidate], bool] = lambda _: False,
     client: object | None = None,
+    cancel_event: Event | None = None,
+    allowed_operations: set[str] | None = None,
+    intended_bundle: str | None = None,
+    stream_app: str | None = None,
 ) -> dict[str, object]:
     """Let Jev select each prerequisite; never repeat a sent or uncertain insertion."""
 
     report = {
-        "schema_version": 3, "goal": goal, "outcome": "failed",
+        "schema_version": 3, "goal": goal, "outcome": "failed", "python_executable": sys.executable,
         "effect_sent": False, "verified": False,
         "completion_scope": "selected_action", "timings_ms": {}, "steps": [],
     }
     started = stage = perf_counter()
     pending_payload_id = None
-    field_choice_bundle = None
+    created_note = None
+    prepared_field = None
+    pressed_controls = set()
+    recoveries = 0
+    required = required_workflow_operations(goal)
+    workflow = bool(required - {"TYPE_TEXT"})
+    limit = 8 if workflow else MAX_STEPS
+    verified_operations = set()
 
     def timing(name: str) -> None:
         """Accumulate phase costs across the bounded preparation sequence."""
@@ -46,6 +59,15 @@ def run_goal(
         report["timings_ms"][name] = report["timings_ms"].get(name, 0) + round((now - stage) * 1_000)
         stage = now
 
+    def cancellation_requested() -> bool:
+        """Stop before another provider request or native effect after voice Stop."""
+
+        if cancel_event is not None and cancel_event.is_set():
+            report["outcome"] = "cancelled"
+            report["reason"] = "Stopped before the next desktop effect; completed effects remain."
+            return True
+        return False
+
     try:
         if not goal.strip():
             raise DesktopError("Enter a nonempty text goal.")
@@ -54,34 +76,53 @@ def run_goal(
             report["reason"] = "This request is outside the local safety boundary."
             return report
 
-        for index in range(MAX_STEPS):
+        for index in range(limit):
+            if cancellation_requested():
+                return report
             report["verified"] = False
             before: DesktopState = desktop.snapshot()
+            if index == 0 and intended_bundle and (before.active is None or before.active.bundle_id != intended_bundle):
+                raise DesktopError("The queued instruction's intended app changed; no effect was sent.")
             menu = desktop.semantic_menu(goal, before)
-            if field_choice_bundle is not None:
-                if before.active is None or before.active.bundle_id != field_choice_bundle:
-                    raise DesktopError("The foreground app changed before choosing its typing field.")
-                # Correct an app-level typing choice through Jev, using only
-                # this app's fresh fields. No field is selected locally.
-                menu = SemanticMenu(goal, {
-                    key: facts for key, facts in menu.targets.items()
-                    if key == "none" or (facts.get("scope") == "field"
-                                         and facts.get("bundle_identifier") == field_choice_bundle)
-                }, menu.payloads)
+            menu = SemanticMenu(goal, {key: facts for key, facts in menu.targets.items() if key not in pressed_controls}, menu.payloads)
+            if prepared_field is not None:
+                current = next((item for item in before.text_fields if item.id == prepared_field.id), None)
+                if not current or not desktop.text.same_target(prepared_field, current, typing=False):
+                    raise DesktopError("The workflow's prepared editor or window changed; no further effect was sent.")
+                if "TYPE_TEXT" in required:
+                    menu = SemanticMenu(goal, {key: facts for key, facts in menu.targets.items()
+                                              if key in {"none", current.id}}, menu.payloads)
+            if created_note is not None and "TYPE_TEXT" in required:
+                if not same_created_note(desktop, created_note, before):
+                    raise DesktopError("The newly created note or its editor changed; no further effect was sent.")
+                body = note_body(before)
+                menu = SemanticMenu(goal, {key: facts for key, facts in menu.targets.items()
+                                          if key in {"none", body.id}}, menu.payloads)
             report["observed_app"] = before.active.name if before.active else None
             report["accessibility_trusted"] = before.ax_trusted
-            report["editor_readiness"] = {
-                "focused_window_available": before.focused_window_available,
-                "field_count": len(before.text_fields),
-                "can_type_count": sum(item.can_type for item in before.text_fields),
-                **before.editor_diagnostics,
-            }
+            report["editor_readiness"] = editor_readiness(before)
             report["target_ids"], report["payload_ids"] = list(menu.targets), list(menu.payloads)
             timing("observation")
+            if required and not before.ax_trusted:
+                report["outcome"] = "failed"
+                report["reason"] = (
+                    "Typing and Notes/Finder workflows require macOS Accessibility permission for this Python host. "
+                    "Run python -m app --request-accessibility from the same terminal, enable the identified host "
+                    "in System Settings > Privacy & Security > Accessibility, and restart it if needed. "
+                    "No Jev request or desktop effect was sent."
+                )
+                return report
             state = before.provider_state()
             # Prior verified operations help Jev advance rather than repeat preparation.
             state["verified_steps"] = [item["decision"]["semantic"]["operation"] for item in report["steps"] if item["verified"]]
             state["pending_payload_id"] = pending_payload_id
+            state["required_operations"] = sorted(required) if workflow else []
+            state["remaining_operations"] = sorted(required - verified_operations) if workflow else []
+            state["recent_actions"] = [{"operation": item["decision"]["semantic"]["operation"],
+                                        "target_id": item["decision"]["semantic"]["target_id"],
+                                        "effect_sent": item["effect_sent"], "verified": item["verified"],
+                                        "outcome": item.get("outcome")}
+                                       for item in report["steps"][-8:]]
             decision = select_action(
                 goal, state, menu, api_key=load_api_key() if client is None else None,
                 model=model, client=client,
@@ -91,61 +132,91 @@ def run_goal(
             step = {"index": index + 1, "decision": decision.to_dict(), "effect_sent": False, "verified": False}
             report["steps"].append(step)
             timing("jev")
+            if cancellation_requested():
+                return report
+            if allowed_operations is not None and decision.semantic["operation"] not in allowed_operations:
+                report["outcome"] = "unsupported"
+                report["reason"] = "Streaming app clauses may only open or focus an app; this effect was withheld."
+                return report
+            if stream_app and action is not None and action.parameters.get("bundle_identifier") != stream_app:
+                raise DesktopError("The streaming decision did not match the explicitly named app; no effect was sent.")
             payload_id = decision.semantic["payload_id"]
             if pending_payload_id is not None and payload_id not in {"none", pending_payload_id}:
                 raise SemanticError("Jev changed the prepared typing payload; no further effect was sent.")
             if decision.semantic["operation"] == "STOP":
+                if stream_app and before.active and before.active.bundle_id == stream_app:
+                    current = desktop.snapshot()
+                    if current.active != before.active:
+                        raise DesktopError("The already-active app changed during Jev; the streaming clause was not verified.")
+                    step.update(verified=True, outcome="already_active")
+                    report.update(outcome="completed", verified=True, completion_scope="already_active")
+                    return report
+                if required == {"PRESS_CONTROL"} and pressed_controls:
+                    report.update(outcome="completed", verified=True, completion_scope="verified_actions",
+                                  reason="Jev stopped after observable control effects; arbitrary goal completion is not proven.")
+                    return report
                 report["outcome"] = "incomplete" if index else "stopped"
-                report["reason"] = "Jev selected STOP before typing was completed; no further effect was sent."
+                report["reason"] = "Jev selected STOP before the requested effects were verified; no further effect was sent."
                 return report
             if action is None:
-                target = decision.semantic["target"]
-                if (decision.semantic["operation"] == "TYPE_TEXT"
-                        and target.get("scope") == "application"
-                        and field_choice_bundle is None and before.ax_trusted
-                        and before.active and before.active.bundle_id == decision.semantic["target_id"]
-                        and any(item.bundle_id == before.active.bundle_id
-                                and (item.can_type or (item.focusable and not item.focused))
-                                for item in before.text_fields)):
-                    field_choice_bundle = before.active.bundle_id
-                    pending_payload_id = payload_id
-                    step["outcome"] = "reselect_field"
-                    step["reason"] = "Jev selected the app for typing; requesting a fresh observed field choice."
-                    continue
                 report["outcome"] = "unsupported"
                 report["reason"] = "No executable grounded target is available for the selected operation."
-                if decision.semantic["operation"] == "TYPE_TEXT":
-                    if not before.ax_trusted:
-                        report["reason"] = "Typing requires macOS Accessibility permission for this Python host."
-                    elif not before.text_fields:
-                        name = before.active.name if before.active else "the active app"
-                        report["reason"] = (
-                            f"No editable field was discovered in {name}; TYPE_TEXT needs a field target. "
-                            "Open an existing editable document and focus its body. "
-                            "See editor_readiness for discovery failures; document creation is not implemented."
-                        )
-                    else:
-                        report["reason"] = "TYPE_TEXT selected an application target; insertion requires an observed field target."
                 return report
             if action.parameters.get("continue_typing") and not before.ax_trusted:
                 raise TextInputError("Typing preparation requires macOS Accessibility permission.")
-            if index and action.kind in {"OPEN_APP", "FOCUS_APP"} and not action.parameters.get("continue_typing"):
-                raise DesktopError("A typing preparation sequence cannot finish with an ordinary app activation.")
-            if (action.kind == "FOCUS_FIELD" or action.parameters.get("continue_typing")) and payload_id != "none":
+            if (action.kind == "TYPE_TEXT" and bool((required & {"CREATE_NOTE", "PRESS_CONTROL"}) - verified_operations)
+                    or action.kind in {"SELECT_ITEM", "OPEN_ITEM"} and "SEARCH" in required and "SEARCH" not in verified_operations):
+                report["outcome"] = "incomplete"
+                report["reason"] = "Jev skipped a required creation/search prerequisite; no effect was sent."
+                return report
+            if action.kind in {"CREATE_NOTE", "SEARCH", "SELECT_ITEM", "OPEN_ITEM"} and action.kind in verified_operations:
+                raise DesktopError("This workflow effect already verified; it was not repeated.")
+            if action.kind == "PRESS_CONTROL" and action.parameters["element_id"] in pressed_controls:
+                raise DesktopError("This control effect already verified; it was not repeated.")
+            if prepared_field is not None and action.kind in {"TYPE_TEXT", "FOCUS_FIELD"} and action.parameters["element_id"] != prepared_field.id:
+                raise DesktopError("Jev selected a different editor from the verified preparation; no effect was sent.")
+            if decision.semantic["operation"] in PREPARATION_OPERATIONS and payload_id != "none":
                 pending_payload_id = payload_id
+            if created_note is not None and action.kind == "TYPE_TEXT":
+                body = note_body(before)
+                if action.parameters["element_id"] != body.id or body.value != "" or body.selection != (0, 0):
+                    raise DesktopError("The new note is not an empty body with a readable starting caret; no text was sent.")
 
             def validate_target() -> DesktopState:
                 """Bind decision and approval to the same live application/editor facts."""
 
                 fresh = desktop.snapshot()
+                if prepared_field is not None:
+                    current = next((item for item in fresh.text_fields if item.id == prepared_field.id), None)
+                    if not current or not desktop.text.same_target(prepared_field, current, typing=False):
+                        raise DesktopError("The workflow's prepared editor changed while deciding or approving; no effect was sent.")
+                if created_note is not None and not same_created_note(desktop, created_note, fresh):
+                    raise DesktopError("The newly created note changed while deciding or approving; no effect was sent.")
                 desktop.validate_action(action, before, fresh)
                 target_id = decision.semantic["target_id"]
                 if desktop.semantic_menu(goal, fresh).targets.get(target_id) != decision.semantic["target"]:
                     raise DesktopError("The selected target is no longer a current action.")
                 return fresh
 
-            fresh = validate_target()
+            try:
+                fresh = validate_target()
+            except DesktopError:
+                fresh = desktop.snapshot()
+                original = next((item for item in before.workflow_targets if item.id == action.parameters.get("element_id")), None)
+                replacement = next((item for item in fresh.workflow_targets if original and item.kind == original.kind
+                                    and item.label == original.label and item.pid == original.pid
+                                    and desktop.text.equal(item.window, original.window)
+                                    and not desktop.text.equal(item.element, original.element)
+                                    and item.selected == original.selected and item.expanded == original.expanded), None)
+                if action.kind not in {"CREATE_NOTE", "PREPARE_SEARCH", "PRESS_CONTROL"} or before.active != fresh.active or replacement is None or recoveries >= 2:
+                    raise
+                recoveries += 1
+                step.update(outcome="reobserve", reason="The control changed before dispatch; asking Jev against fresh targets.")
+                timing("recovery")
+                continue
             timing("fresh_target")
+            if cancellation_requested():
+                return report
             policy = disposition(action, decision.confidence)
             report["safety"] = policy
             if policy == "deny":
@@ -161,26 +232,55 @@ def run_goal(
                 fresh = validate_target()
                 timing("approval")
 
+            if cancellation_requested():
+                return report
+
             # Dispatch failure can still mean a partial effect. Never replay it.
             report["effect_sent"] = step["effect_sent"] = True
             report["verified"] = False
             desktop.execute(action)
             timing("execution")
-            verified = verify_action(desktop, action, fresh)
+            observations, diagnostics = [], {}
+            verified = verify_action(desktop, action, fresh, observations=observations, diagnostics=diagnostics, cancel_event=cancel_event)
+            step["verification"] = diagnostics
             report["verified"] = step["verified"] = verified
             timing("verification")
+            if cancellation_requested():
+                return report
             if not verified:
                 report["outcome"] = "unverified"
                 report["reason"] = "The exact intended effect was not observed; it was not retried."
+                if action.kind in {"OPEN_APP", "FOCUS_APP"} and (action.parameters.get("continue_typing") or action.parameters.get("continue_workflow")):
+                    report["reason"] = "App preparation did not reach a usable focused Accessibility window; no further Jev decision or typing was sent."
+                elif diagnostics.get("reason"):
+                    report["reason"] = f"{action.kind} could not be verified ({diagnostics['reason']}); it was not retried."
                 return report
-            if action.kind == "FOCUS_FIELD" or action.parameters.get("continue_typing"):
+            if action.kind == "CREATE_NOTE":
+                created_note = observations[-1]
+            if action.kind == "PRESS_CONTROL":
+                pressed_controls.add(action.parameters["element_id"])
+                if diagnostics["reason"] == "editor_changed" and len(observations[-1].text_fields) == 1:
+                    prepared_field = observations[-1].text_fields[0]
+            verified_operations.add(action.kind)
+            if workflow:
+                if required <= verified_operations and required != {"PRESS_CONTROL"}:
+                    report["outcome"] = "completed"
+                    report["completion_scope"] = "verified_workflow"
+                    report["verified_operations"] = sorted(verified_operations)
+                    return report
+                if action.kind == "TYPE_TEXT":
+                    report["outcome"] = "incomplete"
+                    report["reason"] = "Typing verified but another requested workflow effect remains; insertion was not repeated."
+                    return report
+                continue
+            if action.kind in {"FOCUS_FIELD", "PRESS_CONTROL"} or action.parameters.get("continue_typing") or action.parameters.get("continue_workflow") or action.kind == "PREPARE_SEARCH":
                 continue
             report["outcome"] = "completed"
             if action.kind == "TYPE_TEXT":
                 report["completion_scope"] = "single_insertion"
             return report
         report["outcome"] = "incomplete"
-        report["reason"] = "The four-step typing preparation limit was reached; completed effects remain."
+        report["reason"] = f"The {limit}-step preparation/workflow limit was reached; completed effects remain."
     except (DesktopError, JevCallError, ConfigurationError, SemanticError, TextInputError) as error:
         if isinstance(error, JevCallError) and error.rejected_decision is not None:
             report["rejected_decision"] = error.rejected_decision

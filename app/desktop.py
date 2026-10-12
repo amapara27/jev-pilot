@@ -1,4 +1,4 @@
-"""Ground installed application targets and perform locally resolved app actions."""
+"""Observe live app/editor/control targets and guard their native effects."""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from Foundation import NSDate, NSRunLoop
 from .models import ActionCandidate
 from .semantics import SemanticMenu, extract_payloads
 from .text_input import NativeText, TextField, TextInputError
+from .workflows import NativeWorkflows, WorkflowTarget, WORKFLOW_KINDS, file_identity
+from .verification import selected_notes
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,8 @@ class DesktopState:
     focused_window_available: bool
     text_fields: tuple[TextField, ...] = ()
     editor_diagnostics: dict[str, object] = field(default_factory=dict)
+    workflow_targets: tuple[WorkflowTarget, ...] = ()
+    document_url: str | None = None
 
     def provider_state(self) -> dict[str, object]:
         """Send only the active app; candidates already describe named targets."""
@@ -70,6 +74,7 @@ class MacDesktop:
     def __init__(self, *, workspace=None, text=None) -> None:
         self.workspace = workspace if workspace is not None else NSWorkspace.sharedWorkspace()
         self.text = text if text is not None else NativeText()
+        self.workflows = NativeWorkflows(self.text)
 
     def snapshot(self) -> DesktopState:
         """Observe native app/window facts and bounded, locally retained AX editors."""
@@ -89,6 +94,7 @@ class MacDesktop:
         focused = False
         fields = ()
         diagnostics = {}
+        workflow_targets, document_url = (), None
         if trusted:
             application = ax.AXUIElementCreateApplication(active.pid)
             ax.AXUIElementSetMessagingTimeout(application, 0.2)
@@ -100,7 +106,10 @@ class MacDesktop:
             if focused:
                 fields = self.text.scan(active.pid, active.bundle_id, application, window)
                 diagnostics.update(self.text.diagnostics)
-        return DesktopState(active, running, trusted, focused, fields, diagnostics)
+                workflow_targets = self.workflows.scan(active.pid, active.bundle_id, application, window)
+                resolved = file_identity(self.text.read(window, "AXDocument") or self.text.read(window, "AXURL"))
+                document_url = resolved[0] if resolved else None
+        return DesktopState(active, running, trusted, focused, fields, diagnostics, workflow_targets, document_url)
 
     def semantic_menu(self, goal: str, state: DesktopState) -> SemanticMenu:
         """Ground all supported installed apps without locally classifying the goal."""
@@ -122,6 +131,19 @@ class MacDesktop:
             }
         for item in state.text_fields:
             targets[item.id] = item.provider_target()
+        controls = {}
+        for kind in ("new_note", "find", "query", "open"):
+            matches = [item for item in state.workflow_targets if item.kind == kind]
+            menus = [item for item in matches if item.role == "AXMenuItem"]
+            if kind != "query" and menus:
+                matches = menus
+            if len(matches) == 1:
+                controls[kind] = matches[0].id
+        if state.active and state.active.bundle_id in targets:
+            targets[state.active.bundle_id]["workflow_controls"] = controls
+        for item in state.workflow_targets:
+            if item.kind in {"item", "control"}:
+                targets[item.id] = item.provider_target()
         return SemanticMenu(goal, targets, payloads)
 
     def validate_action(self, action: ActionCandidate, before: DesktopState, fresh: DesktopState) -> None:
@@ -129,7 +151,19 @@ class MacDesktop:
 
         if before.active != fresh.active or fresh.active is None:
             raise DesktopError("The foreground app changed while deciding or approving.")
+        if action.kind in WORKFLOW_KINDS:
+            identifiers = [action.parameters["element_id"]]
+            if action.kind == "OPEN_ITEM":
+                identifiers.append(action.parameters["open_control_id"])
+            for identifier in identifiers:
+                original = next((item for item in before.workflow_targets if item.id == identifier), None)
+                current = next((item for item in fresh.workflow_targets if item.id == identifier), None)
+                if not fresh.ax_trusted or not original or not current or not self.workflows.same_target(original, current):
+                    raise DesktopError("The app-specific control, file, selection or query changed; no effect was sent.")
+            self.validated_state = fresh
         if action.kind in {"TYPE_TEXT", "FOCUS_FIELD"}:
+            if fresh.active.bundle_id == "com.apple.Notes" and selected_notes(before) != selected_notes(fresh):
+                raise TextInputError("The selected note changed before native input; no text or focus was sent.")
             identifier = action.parameters["element_id"]
             original = next((item for item in before.text_fields if item.id == identifier), None)
             current = next((item for item in fresh.text_fields if item.id == identifier), None)
@@ -140,6 +174,14 @@ class MacDesktop:
     def execute(self, action: ActionCandidate) -> None:
         """Dispatch a native app, field focus, or insertion effect without replay."""
 
+        if action.kind in WORKFLOW_KINDS:
+            fresh = self.snapshot()
+            try:
+                self.validate_action(action, self.validated_state, fresh)
+            except DesktopError as error:
+                raise TextInputError(str(error), effect_sent=False) from error
+            self.workflows.execute(action, fresh)
+            return
         if action.kind in {"TYPE_TEXT", "FOCUS_FIELD"}:
             fresh = self.snapshot()
             self.validate_action(action, self.validated_state, fresh)

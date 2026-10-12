@@ -60,10 +60,11 @@ class FakeJev:
         self.questions = None
 
     def system_one(self, state, questions, *, model=None):
+        from test_typing_e2e import choice_answers
         self.calls += 1
         self.questions = questions
         selected = {"operation": self.operation, "target": self.target, "payload": self.payload}
-        choices = {name: SimpleNamespace(choice=selected[name], probabilities={item: float(item == selected[name]) for item in question.criteria}, confidence=self.confidence) for name, question in questions.items()}
+        choices = choice_answers(questions, selected, self.confidence)
         if self.after_call:
             self.after_call()
         return SimpleNamespace(choices=choices, model="fake-jev", request_id="offline-request", usage=SimpleNamespace(input_tokens=4, output_tokens=3))
@@ -92,7 +93,8 @@ class PythonCLIPipelineTests(unittest.TestCase):
             self.assertTrue(report["verified"])
             self.assertEqual(happy.effects, 1)
             self.assertEqual(client.calls, 1)
-            self.assertEqual(set(client.questions), {"operation", "target", "payload"})
+            self.assertIn("target_FOCUS_APP", client.questions)
+            self.assertNotIn("target", client.questions)
 
             opening = FakeDesktop()
             report = run("verified_open", opening, FakeJev(operation="OPEN_APP", target=FINDER.bundle_id), goal="Open Finder")
@@ -132,7 +134,7 @@ class PythonCLIPipelineTests(unittest.TestCase):
             ):
                 desktop = FakeDesktop()
                 report = run(name, desktop, client, "--yes", goal=goal)
-                self.assertEqual(report["outcome"], "unsupported")
+                self.assertEqual(report["outcome"], "unsupported" if name in {"unsupported_click", "terminal_run"} else "failed")
                 self.assertEqual(desktop.effects, 0)
                 self.assertEqual(client.calls, 1)
 
