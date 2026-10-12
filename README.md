@@ -4,13 +4,25 @@ Jev Pilot is an early macOS command-line tool that asks Jev to select an operati
 
 ## What you can do today
 
-Supported app targets are Finder, Terminal, Visual Studio Code, Safari, Google Chrome, System Settings, Notes, and TextEdit. The current foreground app is also available, so typing can work in other apps with accessible editors. Jev interprets which application and field the goal refers to.
+App targets are discovered at startup from `/Applications`, `~/Applications`, `/System/Applications`, and `/System/Library/CoreServices`, including nested utility folders. Embedded helper apps and background-only bundles are excluded. Running apps and familiar aliases such as Chrome and VS Code supplement discovery. Duplicate spoken names stop with the conflicting bundle identifiers; use an identifier to distinguish them. Restart the CLI after installing another app. Jev interprets which application and field the goal refers to.
+
+Website navigation accepts named sites (YouTube, Google, GitHub, Wikipedia, Reddit, Stripe, Gmail), explicit HTTP/HTTPS URLs, and spoken domains such as “stripe dot com.” Web search supports Google and YouTube. Jev selects the current default browser unless you name another installed browser. URLs open through AppKit without address-bar typing, clipboard changes, or Return. Credential-bearing URLs and non-web schemes are rejected.
+
+```sh
+python -m app 'open Cursor'
+python -m app 'go to stripe dot com'
+python -m app 'open example.com in Chrome'
+python -m app 'google best ramen near me'
+python -m app 'search YouTube for "lofi hip hop" in Chrome'
+```
+
+These commands also work through `--listen`. A browser action verifies the requested URL in the selected foreground browser's accessible window/web area; searches verify the site, path and exact query, allowing extra tracking parameters. This proves the URL was observed, not that the page finished loading. Redirects to a different URL, missing Accessibility permission or unavailable browser URL attributes produce `unverified` after one request, without retrying. Live browser compatibility still needs native acceptance.
 
 App-switching commands perform one activation. Typing commands allow up to four Jev-selected steps to activate the app, focus the intended editor, and insert text exactly once. Text replaces the current selection or inserts at the caret, preserving Unicode and whitespace. Multiline text requires an editor with writable Accessibility selected text. Keyboard fallback rejects control characters, and Terminal typing never submits a command.
 
 The CLI continuously transcribes microphone input locally with MLX-Audio's 8-bit Nemotron streaming ASR. Final utterances enter a five-command FIFO and one worker runs the same observe → Jev → guarded effect → verify loop as typed goals. Notes creation, Finder search/selection/opening, and pressing observed Accessibility buttons/menus in other apps use this shared loop. Native compatibility still needs manual acceptance. Terminal submission and coordinate/canvas clicking remain unsupported. Secure, disabled, read-only, oversized, or unverifiable targets are unavailable.
 
-The semantic vocabulary includes app activation, field focus, typing, search, Notes creation, generic control presses, unsupported Terminal submission, STOP, and UNSUPPORTED. Jev sees the full vocabulary as context but chooses only currently available operations. One request asks speculative targets per operation, then consumes only the chosen head. Completed prerequisites/controls are withdrawn; typing waits for required creation. Payloads are exact locally extracted spans. Quotes protect literal command words. Goals over 8192 characters or 16 proposed spans fail locally.
+The semantic vocabulary includes app activation, website navigation/web search, field focus, typing, Finder search, Notes creation, generic control presses, unsupported Terminal submission, STOP, and UNSUPPORTED. Jev sees the full vocabulary as context but chooses only currently available operations. One request asks speculative targets per operation, then consumes only the chosen head. Completed prerequisites/controls are withdrawn; typing waits for required creation. Payloads are exact locally extracted spans. Quotes protect literal command words. Goals over 8192 characters or 16 proposed spans fail locally.
 
 Low-confidence choices require confirmation in an interactive terminal. Goals mentioning passwords, payments, purchases, or deletion are blocked before a request is sent to Jev. App switching uses macOS AppKit and does not require Accessibility permission.
 
@@ -170,6 +182,10 @@ python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
 Offline checks leave `.build/python-e2e.json`, `.build/typing-e2e.json`, and `.build/voice-e2e.json`, exercising production routing with fake Jev/native/speech boundaries. They do not prove model accuracy, live microphone capture, provider compatibility, or application behavior.
+
+`.build/web-e2e.json` covers app discovery/ambiguity, spoken domains, explicit browsers, Unicode/encoded queries, literal query words, voice routing, rejected URLs, stale targets, native failure and exact URL-observation boundaries. Native, provider and audio services are fake; real app discovery/default-browser lookup have separate read-only acceptance.
+
+`.build/request-e2e.json` covers large-catalog request size and safe API failures. Target facts are sent once instead of repeated across every question. Jev context-limit rejections report their cause without raw error bodies; Choice menus above 255 options fail locally without truncating the app list. For provider acceptance with a synthetic catalog and no desktop effects, run `JEV_LIVE_JEV=1 python -m unittest discover -s tests -p 'test_request_e2e.py' -k test_live_catalog_request -v`; this writes `.build/live-request-e2e.json`.
 
 New checks also leave `.build/workflow-e2e.json`, `.build/workflow-failures-e2e.json`
 and `.build/streaming-command-e2e.json`. They cover Notes/Finder effects, stale

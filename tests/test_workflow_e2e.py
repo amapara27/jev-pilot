@@ -207,7 +207,7 @@ class WorkflowEndToEnd(unittest.TestCase):
             desktop, ax = setup("com.apple.Notes")
             class ScopedJev(Jev):
                 def system_one(self, state, questions, *, model=None):
-                    self.assert_scoped(questions)
+                    self.assert_scoped(state, questions)
                     result = super().system_one(state, questions, model=model)
                     if mode == "unused_invalid":
                         result.choices["target_STOP"].choice = "invented"
@@ -216,9 +216,10 @@ class WorkflowEndToEnd(unittest.TestCase):
                     if mode == "unstable" or (mode == "replacement" and len(self.calls) == 1):
                         replace_control()
                     return result
-                def assert_scoped(self, questions):
+                def assert_scoped(self, state, questions):
                     self_test.assertLessEqual(set(questions["target_CREATE_NOTE"].criteria), {"com.apple.Notes", "none"})
-                    self_test.assertTrue(all(key == "none" or facts.get("scope") == "field" for key, facts in questions["target_TYPE_TEXT"].criteria.items()))
+                    self_test.assertTrue(all(key == "none" or state["semantic_options"]["targets"][key].get("scope") == "field"
+                                             for key in questions["target_TYPE_TEXT"].criteria))
             def replace_control():
                 ax.control = Node(AXRole="AXMenuItem", AXTitle="New Note", AXEnabled=True)
                 ax.application.attrs["AXMenuBar"].attrs["AXChildren"][0] = ax.control
@@ -276,8 +277,9 @@ class WorkflowEndToEnd(unittest.TestCase):
                             self_test.assertNotIn("TYPE_TEXT", questions["operation"].criteria)
                             self_test.assertIn("FOCUS_FIELD", questions["operation"].criteria)
                         if not self.calls or mode == "repeat":
-                            target = self.first_control if self.calls else next(key for key, facts in questions["target_PRESS_CONTROL"].criteria.items()
-                                          if facts.get("scope") == "control" and facts["label"] == ax.control.attrs["AXTitle"])
+                            target = self.first_control if self.calls else next(key for key in questions["target_PRESS_CONTROL"].criteria
+                                          if state["semantic_options"]["targets"][key].get("scope") == "control"
+                                          and state["semantic_options"]["targets"][key]["label"] == ax.control.attrs["AXTitle"])
                             self.first_control = target
                             self.plan[min(len(self.calls), len(self.plan) - 1)] = ("PRESS_CONTROL", target, "span_0")
                         result = super().system_one(state, questions, model=model)
@@ -499,7 +501,8 @@ class WorkflowEndToEnd(unittest.TestCase):
                 def system_one(self, state, questions, *, model=None):
                     if len(self.calls) in {1, 2}:
                         operation = "SELECT_ITEM" if len(self.calls) == 1 else "OPEN_ITEM"
-                        item = next(key for key, facts in questions[f"target_{operation}"].criteria.items() if facts.get("scope") == "finder_item")
+                        item = next(key for key in questions[f"target_{operation}"].criteria
+                                    if state["semantic_options"]["targets"][key].get("scope") == "finder_item")
                         self.plan[len(self.calls)] = ("SELECT_ITEM" if len(self.calls) == 1 else "OPEN_ITEM", item, "none")
                     return super().system_one(state, questions, model=model)
             client = FinderJev(plan=[("SEARCH", "com.apple.finder", "span_0"), ("STOP", "none", "none"), ("STOP", "none", "none")])

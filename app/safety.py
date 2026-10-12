@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from .models import ActionCandidate
+from .web_navigation import WEB_OPERATIONS, normalize_web_url
 
 
 def blocked_goal(goal: str) -> bool:
@@ -26,6 +27,11 @@ def disposition(action: ActionCandidate, confidence: float) -> str:
 
     if action.kind == "STOP":
         return "deny"
+    if action.kind in WEB_OPERATIONS:
+        url = action.parameters.get("url")
+        if not isinstance(url, str) or normalize_web_url(url) != url:
+            return "deny"
+        return "allow" if confidence >= 0.82 else "confirm"
     if action.kind == "PRESS_CONTROL":
         label = action.parameters.get("label", "")
         if blocked_goal(label) or action.parameters.get("bundle_identifier") == "com.apple.Terminal":

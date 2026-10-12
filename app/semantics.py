@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import re
 
 from .models import ActionCandidate, JSONValue
+from .web_navigation import WEB_OPERATIONS, navigation_spans, normalize_web_url, search_url
 
 
 # Every operation stays visible even when parsing finds no matching verb or payload.
@@ -18,6 +19,8 @@ OPERATIONS = {
     "FOCUS_APP_FOR_WORKFLOW": "Focus a running background app before a multi-step workflow. Carry the future text/query span (or none); do not insert yet.",
     "FOCUS_FIELD": "Typing prerequisite: focus an observed focusable editable field that is not focused. Carry the intended span (or none); do not insert yet.",
     "TYPE_TEXT": "Insert an exact text span into a focused field with can_type=true, without submission. App-level targets cannot execute insertion.",
+    "OPEN_WEBSITE": "Open an exact named-site/domain/HTTP URL span in an installed browser. Choose the default_browser unless a browser is explicitly requested. Never insert into an editor.",
+    "SEARCH_WEB": "Search a supplied website_search target (Google or YouTube) with an exact query span. Choose the default browser unless explicitly requested. Never use Finder search or type into an editor.",
     "PREPARE_SEARCH": "Activate Finder's observed Find menu to expose a search query field. Carry the query span (or none); do not enter it yet.",
     "SEARCH": "Set Finder's observed search query to an exact text span. Never type a search into a document.",
     "CREATE_NOTE": "Press Notes' uniquely observed New Note control. Carry the future typing span (or none), without insertion. Observe the new empty body before typing.",
@@ -67,6 +70,10 @@ class SemanticMenu:
             valid = valid and target["focusable"] and not target["focused"]
         elif operation == "TYPE_TEXT":
             valid = target.get("scope") == "field" and payload_id != "none" and target["can_type"]
+        elif operation == "OPEN_WEBSITE":
+            valid = target.get("scope") == "application" and target.get("is_browser") and normalize_web_url(payload.get("text")) is not None
+        elif operation == "SEARCH_WEB":
+            valid = target.get("scope") == "website_search" and search_url(target.get("site"), payload.get("text")) is not None
         elif operation == "CREATE_NOTE":
             valid = target_id == "com.apple.Notes"
         elif operation == "PRESS_CONTROL":
@@ -113,6 +120,11 @@ class SemanticMenu:
                 parameters=parameters,
                 description=f"{'Open' if kind == 'OPEN_APP' else 'Focus'} {target['name']}.",
             )
+        elif operation in WEB_OPERATIONS:
+            url = normalize_web_url(payload["text"]) if operation == "OPEN_WEBSITE" else search_url(target["site"], payload["text"])
+            action = ActionCandidate(f"{operation}:{target_id}:{payload_id}", operation,
+                                    {"bundle_identifier": target["bundle_identifier"], "url": url},
+                                    f"Open {url} in {target.get('browser', target.get('name'))}.")
         elif operation in {"TYPE_TEXT", "FOCUS_FIELD"} and target.get("scope") == "field":
             parameters = {
                 "element_id": target_id, "bundle_identifier": target["bundle_identifier"],
@@ -154,7 +166,14 @@ class SemanticMenu:
         span = next((key for key in self.payloads if key != "none"), "none")
         criteria = {}
         for operation, description in OPERATIONS.items():
+            payload_ids = [key for key in self.payloads if key != "none"]
+            if operation == "OPEN_WEBSITE":
+                payload_ids = [key for key in payload_ids if normalize_web_url(self.payloads[key]["text"])]
+            elif operation == "SEARCH_WEB":
+                payload_ids = [key for key in payload_ids if search_url("google", self.payloads[key]["text"])]
             payload = span if operation in {"TYPE_TEXT", "SEARCH", "RUN_COMMAND"} else "none"
+            if operation in WEB_OPERATIONS:
+                payload = next(iter(payload_ids), "none")
             targets = []
             for identifier in self.targets:
                 try:
@@ -166,9 +185,7 @@ class SemanticMenu:
                     targets.append(identifier)
             if operation in PREPARATION_OPERATIONS:
                 payload_ids = list(self.payloads)
-            elif operation in {"TYPE_TEXT", "SEARCH", "RUN_COMMAND"}:
-                payload_ids = [key for key in self.payloads if key != "none"]
-            else:
+            elif operation not in {"TYPE_TEXT", "SEARCH", "RUN_COMMAND"} | WEB_OPERATIONS:
                 payload_ids = ["none"]
             criteria[operation] = {"description": description, "available_targets": targets,
                                    "available_payloads": payload_ids}
@@ -196,7 +213,7 @@ def extract_payloads(goal: str) -> dict[str, dict[str, JSONValue]]:
         add(match.start() + 1, match.end() - 1)
     # ponytail: narrow English span proposals; add forms when real workflows need them.
     verbs = re.finditer(
-        r"\b(?:type(?:\s+command)?|write|dictate|insert|(?:search|find|locate)(?:\s+(?:in\s+)?Finder)?(?:\s+for)?|run(?:\s+command)?)\s+",
+        r"\b(?:type(?:\s+command)?|write|dictate|insert|(?:search|find|locate)(?:\s+(?:in\s+)?(?:Finder|Google|YouTube|(?:the\s+)?web))?(?:\s+for)?|google|run(?:\s+command)?)\s+",
         goal,
         re.IGNORECASE,
     )
@@ -208,11 +225,13 @@ def extract_payloads(goal: str) -> dict[str, dict[str, JSONValue]]:
         # Keep the full suffix AND alternatives: Jev decides whether trailing words
         # are literal text, an app context, a prerequisite, or another command.
         for boundary in re.finditer(
-            r"\s+(?:in\s+(?:a\s+new\s+note|[\w ]+)|and\s+(?:then\s+)?(?:open|switch|type|write|search|run)\b)",
+            r"\s+(?:(?:in|using|with)\s+(?:a\s+new\s+note|[\w ]+)|and\s+(?:then\s+)?(?:open|switch|type|write|search|run)\b)",
             goal[start:],
             re.IGNORECASE,
         ):
             add(start, start + boundary.start())
+    for start, end in navigation_spans(goal):
+        add(start, end)
     return {
         "none": {"description": "No payload."},
         **{
@@ -225,21 +244,26 @@ def extract_payloads(goal: str) -> dict[str, dict[str, JSONValue]]:
 def required_workflow_operations(goal: str) -> set[str]:
     """Recognize supported completion requirements while shielding quoted/typed text."""
 
-    command = re.sub(r'"(?:\\.|[^"\\])*"|“[^”]*”|(?<!\w)\x27[^\x27]*\x27(?!\w)', ' PAYLOAD ', goal).casefold()
-    typing = re.search(r"\b(?:type|write|dictate|insert)\s+", command)
-    required = {"TYPE_TEXT"} if typing else set()
-    if "in a new note" in command:
+    command = re.sub(r'"(?:\\.|[^"\\])*"|“[^”]*”|(?<!\w)\x27[^\x27]*\x27(?!\w)', lambda match: " " * len(match.group()), goal)
+    typing = re.search(r"\b(?:type|write|dictate|insert)\s+", command, re.IGNORECASE)
+    search = re.search(r"\b(?:google\s+|search\s+(?:(?:the\s+)?web|google|youtube)(?:\s+for)?\s+)", command, re.IGNORECASE)
+    web_search = search is not None and (typing is None or search.start() < typing.start())
+    required = {"SEARCH_WEB"} if web_search else {"TYPE_TEXT"} if typing else set()
+    if not web_search and "in a new note" in command.casefold():
         required.add("CREATE_NOTE")
-    if typing:
-        command = command[:typing.start()]
+    boundary = search.start() if web_search else typing.start() if typing else len(goal)
+    command, source = command[:boundary].casefold(), goal[:boundary]
+    web_open = any(normalize_web_url(source[start:end]) for start, end in navigation_spans(source))
+    if web_open:
+        required.add("OPEN_WEBSITE")
     if re.search(r"\b(?:(?:create|make|start)\s+(?:a\s+)?(?:new\s+)?note|open\s+(?:a\s+)?new\s+note)\b", command):
         required.add("CREATE_NOTE")
     if re.search(r"\b(?:click|press|choose)\b|\b(?:create|make|open)\s+(?:a\s+)?new\s+(?:document|window|tab)\b", command):
         required.add("PRESS_CONTROL")
-    if re.search(r"\b(?:search|find|locate)\b", command):
+    if not web_search and re.search(r"\b(?:search|find|locate)\b", command):
         required.add("SEARCH")
     if re.search(r"\bselect\b", command):
         required.add("SELECT_ITEM")
-    if re.search(r"\bopen\s+(?:it|this|that|the\s+(?:file|result)|[\w.-]+\.[a-z0-9]+)\b", command):
+    if not web_open and re.search(r"\bopen\s+(?:it|this|that|the\s+(?:file|result)|[\w.-]+\.[a-z0-9]+)\b", command):
         required.add("OPEN_ITEM")
     return required

@@ -181,7 +181,8 @@ class Jev:
         self.calls.append(state)
         operation, target, payload = self.plan[min(index, len(self.plan) - 1)]
         if target == "editor":
-            target = next((key for key, facts in questions[f"target_{operation}"].criteria.items() if isinstance(facts, dict) and facts.get("scope") == "field"), "missing_editor")
+            target = next((key for key in questions[f"target_{operation}"].criteria
+                           if state["semantic_options"]["targets"][key].get("scope") == "field"), "missing_editor")
         selections = {"operation": operation, "target": target, "payload": payload}
         answers = choice_answers(questions, selections, self.confidence)
         if self.mutate_answers:

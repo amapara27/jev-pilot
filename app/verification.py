@@ -6,6 +6,7 @@ from time import monotonic, sleep
 
 from .models import ActionCandidate
 from .text_input import expected_insertion, utf16_length
+from .web_navigation import WEB_OPERATIONS, web_url_matches
 
 
 def editor_readiness(state: object) -> dict:
@@ -96,6 +97,11 @@ def verify_action(desktop: object, action: ActionCandidate, before: object, time
                     if current.can_type and current.value == "" and current.selection == (0, 0) and previous and (previous.value not in {None, ""} or not desktop.text.equal(previous.window, current.window)):
                         details["reason"] = "new_empty_body"
                         return True
+            elif action.kind in WEB_OPERATIONS:
+                details["reason"] = "browser_url_unobserved"
+                if web_url_matches(action.parameters["url"], state.browser_url, search=action.kind == "SEARCH_WEB"):
+                    details["reason"] = "browser_url_observed"
+                    return True
             elif action.kind == "PREPARE_SEARCH":
                 if any(item.kind == "query" for item in state.workflow_targets):
                     details["reason"] = "search_query_available"
@@ -135,7 +141,7 @@ def verify_action(desktop: object, action: ActionCandidate, before: object, time
                     if current.value == expected_value and current.selection == expected_caret:
                         details["reason"] = "exact_insertion_observed"
                         return True
-        if before is not None and state.active != before.active and action.kind not in {"OPEN_APP", "FOCUS_APP", "OPEN_ITEM"}:
+        if before is not None and state.active != before.active and action.kind not in {"OPEN_APP", "FOCUS_APP", "OPEN_ITEM"} | WEB_OPERATIONS:
             details["reason"] = "foreground_app_changed"
             return False
         if monotonic() >= deadline:

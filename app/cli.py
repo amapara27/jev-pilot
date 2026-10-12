@@ -96,8 +96,7 @@ def _run_voice(
             stopping.set()
             raise AudioInputError("The five-command goal queue is full; listening stopped and this instruction was rejected.") from error
 
-    from .desktop import SUPPORTED_APPS
-    stream = StreamingCommands({alias: bundle for _, bundle, aliases in SUPPORTED_APPS for alias in aliases}, commit) if args.stream_prefixes else None
+    stream = StreamingCommands(target_desktop.application_aliases(), commit) if args.stream_prefixes else None
 
     def on_partial(text: str) -> None:
         """Show hypotheses and optionally queue a stable app clause."""

@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from time import monotonic
 
 from AppKit import NSWorkspace, NSWorkspaceOpenConfiguration
-from Foundation import NSDate, NSRunLoop
+from Foundation import NSDate, NSRunLoop, NSBundle, NSURL
 
 from .models import ActionCandidate
 from .semantics import SemanticMenu, extract_payloads
 from .text_input import NativeText, TextField, TextInputError
 from .workflows import NativeWorkflows, WorkflowTarget, WORKFLOW_KINDS, file_identity
 from .verification import selected_notes
+from .app_catalog import APP_ALIASES, APPLICATION_ROOTS, discover_applications
+from .web_navigation import BROWSER_BUNDLES, SEARCH_SITES, WEB_OPERATIONS, browser_url, normalize_web_url
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,7 @@ class DesktopState:
     editor_diagnostics: dict[str, object] = field(default_factory=dict)
     workflow_targets: tuple[WorkflowTarget, ...] = ()
     document_url: str | None = None
+    browser_url: str | None = None
 
     def provider_state(self) -> dict[str, object]:
         """Send only the active app; candidates already describe named targets."""
@@ -51,19 +55,6 @@ def _app_dict(app: AppState) -> dict[str, object]:
     return {"name": app.name, "bundle_identifier": app.bundle_id, "process_identifier": app.pid}
 
 
-# A small named-app vocabulary proves the native path without guessing arbitrary bundle IDs.
-SUPPORTED_APPS = (
-    ("Finder", "com.apple.finder", ("finder",)),
-    ("Terminal", "com.apple.Terminal", ("terminal",)),
-    ("Visual Studio Code", "com.microsoft.VSCode", ("vs code", "vscode", "visual studio code")),
-    ("Safari", "com.apple.Safari", ("safari",)),
-    ("Google Chrome", "com.google.Chrome", ("chrome", "google chrome")),
-    ("System Settings", "com.apple.systempreferences", ("settings", "system settings")),
-    ("Notes", "com.apple.Notes", ("notes",)),
-    ("TextEdit", "com.apple.TextEdit", ("textedit", "text edit")),
-)
-
-
 class DesktopError(RuntimeError):
     """A safe-to-display local macOS action or observation failure."""
 
@@ -71,10 +62,41 @@ class DesktopError(RuntimeError):
 class MacDesktop:
     """Ground AX editors locally and execute only fresh, validated app/text effects."""
 
-    def __init__(self, *, workspace=None, text=None) -> None:
+    def __init__(self, *, workspace=None, text=None, application_roots=APPLICATION_ROOTS) -> None:
         self.workspace = workspace if workspace is not None else NSWorkspace.sharedWorkspace()
         self.text = text if text is not None else NativeText()
         self.workflows = NativeWorkflows(self.text)
+        self.applications = discover_applications(application_roots)
+
+    def application_catalog(self, state: DesktopState | None = None) -> tuple:
+        """Combine discovered bundles, running apps and familiar installed aliases."""
+
+        catalog = {bundle: (name, bundle, aliases) for name, bundle, aliases in APP_ALIASES}
+        catalog.update({item[1]: item for item in getattr(self, "applications", ())})
+        if state is not None:
+            for app in state.running + ((state.active,) if state.active else ()):
+                if app.bundle_id not in catalog:
+                    catalog[app.bundle_id] = (app.name, app.bundle_id, (app.name.casefold(),))
+        return tuple(item for item in catalog.values()
+                     if self.workspace.URLForApplicationWithBundleIdentifier_(item[1]) is not None)
+
+    def application_aliases(self) -> dict[str, str]:
+        """Expose only unique installed aliases to early speech-prefix recognition."""
+
+        owners = {}
+        for _, bundle, aliases in self.application_catalog():
+            for alias in aliases:
+                owners.setdefault(alias, set()).add(bundle)
+        return {alias: next(iter(bundles)) for alias, bundles in owners.items() if len(bundles) == 1}
+
+    def default_browser(self) -> str | None:
+        """Ask Launch Services for the current HTTPS handler without opening a URL."""
+
+        if not hasattr(self.workspace, "URLForApplicationToOpenURL_"):
+            return None
+        url = self.workspace.URLForApplicationToOpenURL_(NSURL.URLWithString_("https://example.com/"))
+        bundle = NSBundle.bundleWithURL_(url) if url is not None else None
+        return str(bundle.bundleIdentifier()) if bundle and bundle.bundleIdentifier() else None
 
     def snapshot(self) -> DesktopState:
         """Observe native app/window facts and bounded, locally retained AX editors."""
@@ -94,7 +116,7 @@ class MacDesktop:
         focused = False
         fields = ()
         diagnostics = {}
-        workflow_targets, document_url = (), None
+        workflow_targets, document_url, current_browser_url = (), None, None
         if trusted:
             application = ax.AXUIElementCreateApplication(active.pid)
             ax.AXUIElementSetMessagingTimeout(application, 0.2)
@@ -109,26 +131,48 @@ class MacDesktop:
                 workflow_targets = self.workflows.scan(active.pid, active.bundle_id, application, window)
                 resolved = file_identity(self.text.read(window, "AXDocument") or self.text.read(window, "AXURL"))
                 document_url = resolved[0] if resolved else None
-        return DesktopState(active, running, trusted, focused, fields, diagnostics, workflow_targets, document_url)
+                if active.bundle_id in BROWSER_BUNDLES or active.bundle_id == self.default_browser():
+                    current_browser_url = browser_url(self.text, window)
+        return DesktopState(active, running, trusted, focused, fields, diagnostics, workflow_targets, document_url, current_browser_url)
 
     def semantic_menu(self, goal: str, state: DesktopState) -> SemanticMenu:
         """Ground all supported installed apps without locally classifying the goal."""
 
         payloads = extract_payloads(goal)
         targets = {"none": {"description": "No grounded target."}}
-        catalog = list(SUPPORTED_APPS)
-        if state.active and state.active.bundle_id not in {item[1] for item in catalog}:
-            catalog.append((state.active.name, state.active.bundle_id, (state.active.name.casefold(),)))
+        catalog = self.application_catalog(state)
+        owners = {}
+        for _, bundle, aliases in catalog:
+            for alias in aliases:
+                owners.setdefault(alias, set()).add(bundle)
+        quoted = r'"(?:\\.|[^"\\])*"|“[^”]*”|(?<!\w)\x27[^\x27]*\x27(?!\w)'
+        masked = re.sub(quoted, lambda match: " " * len(match.group()), goal)
+        literal = re.search(r"\b(?:type|write|dictate|insert|google|search\s+(?:google|youtube|(?:the\s+)?web)(?:\s+for)?)\s+", masked, re.IGNORECASE)
+        prefix = goal[:literal.start()] if literal else goal
+        command = re.sub(quoted, lambda match: match.group()[1:-1], prefix).casefold()
+        if literal:
+            context = re.search(r"\b(?:in|using|with)\s+[\w .-]+$", masked, re.IGNORECASE)
+            if context:
+                command += " " + context.group().casefold()
+        for alias, bundles in owners.items():
+            if len(bundles) > 1 and re.search(r"\b(?:open|launch|focus|switch\s+to|in|using|with)\s+" + re.escape(alias) + r"(?=$|[.,!?]|\s+(?:app\b|and\b|then\b))", command):
+                raise DesktopError(f"The app name {alias!r} is ambiguous: {', '.join(sorted(bundles))}. Specify its bundle identifier.")
+        default_browser = self.default_browser()
         for name, bundle_id, aliases in catalog:
-            if self.workspace.URLForApplicationWithBundleIdentifier_(bundle_id) is None:
-                continue
             targets[bundle_id] = {
                 "name": name, "bundle_identifier": bundle_id, "aliases": list(aliases),
                 "running": any(app.bundle_id == bundle_id for app in state.running),
                 "active": bool(state.active and state.active.bundle_id == bundle_id),
                 "process_identifiers": sorted(app.pid for app in state.running if app.bundle_id == bundle_id),
                 "scope": "application",
+                "is_browser": bundle_id in BROWSER_BUNDLES or bundle_id == default_browser,
+                "default_browser": bundle_id == default_browser,
             }
+        for bundle, facts in list(targets.items()):
+            if facts.get("is_browser"):
+                for site in SEARCH_SITES:
+                    targets[f"web:{site}:{bundle}"] = {"scope": "website_search", "site": site,
+                        "bundle_identifier": bundle, "browser": facts["name"], "default_browser": facts["default_browser"]}
         for item in state.text_fields:
             targets[item.id] = item.provider_target()
         controls = {}
@@ -151,6 +195,12 @@ class MacDesktop:
 
         if before.active != fresh.active or fresh.active is None:
             raise DesktopError("The foreground app changed while deciding or approving.")
+        if action.kind in WEB_OPERATIONS:
+            if normalize_web_url(action.parameters.get("url")) != action.parameters.get("url"):
+                raise DesktopError("The browser destination is not a validated HTTP URL.")
+            if self.workspace.URLForApplicationWithBundleIdentifier_(action.parameters["bundle_identifier"]) is None:
+                raise DesktopError("The selected browser is no longer installed.")
+            self.validated_state = fresh
         if action.kind in WORKFLOW_KINDS:
             identifiers = [action.parameters["element_id"]]
             if action.kind == "OPEN_ITEM":
@@ -204,7 +254,7 @@ class MacDesktop:
             else:
                 self.text.insert(target, action.parameters["text"], guard)
             return
-        if action.kind not in {"OPEN_APP", "FOCUS_APP"}:
+        if action.kind not in {"OPEN_APP", "FOCUS_APP"} | WEB_OPERATIONS:
             raise DesktopError("This operation has no native executor yet.")
         bundle_id = action.parameters.get("bundle_identifier")
         if not isinstance(bundle_id, str):
@@ -215,14 +265,23 @@ class MacDesktop:
         configuration = NSWorkspaceOpenConfiguration.configuration()
         configuration.setActivates_(True)
         completion: list[tuple[object, object]] = []
-        self.workspace.openApplicationAtURL_configuration_completionHandler_(
-            url, configuration, lambda app, error: completion.append((app, error))
-        )
+        if action.kind in WEB_OPERATIONS:
+            try:
+                self.validate_action(action, self.validated_state, self.snapshot())
+            except DesktopError as error:
+                raise TextInputError(str(error), effect_sent=False) from error
+            self.workspace.openURLs_withApplicationAtURL_configuration_completionHandler_(
+                [NSURL.URLWithString_(action.parameters["url"])], url, configuration,
+                lambda app, error: completion.append((app, error)))
+        else:
+            self.workspace.openApplicationAtURL_configuration_completionHandler_(
+                url, configuration, lambda app, error: completion.append((app, error)))
         deadline = monotonic() + 5
         while not completion and monotonic() < deadline:
             NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.05))
         if not completion or completion[0][0] is None or completion[0][1] is not None:
-            raise DesktopError("macOS did not confirm the application activation request.")
+            raise DesktopError("macOS did not confirm the browser URL request." if action.kind in WEB_OPERATIONS
+                               else "macOS did not confirm the application activation request.")
 
     @staticmethod
     def _app(application: object) -> AppState:

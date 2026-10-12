@@ -15,6 +15,7 @@ from .safety import blocked_goal, disposition
 from .verification import verify_action, editor_readiness, note_body, same_created_note
 from .semantics import SemanticError, SemanticMenu, PREPARATION_OPERATIONS, required_workflow_operations
 from .text_input import TextInputError
+from .web_navigation import WEB_OPERATIONS
 
 
 MAX_STEPS = 4
@@ -103,7 +104,7 @@ def run_goal(
             report["editor_readiness"] = editor_readiness(before)
             report["target_ids"], report["payload_ids"] = list(menu.targets), list(menu.payloads)
             timing("observation")
-            if required and not before.ax_trusted:
+            if required - WEB_OPERATIONS and not before.ax_trusted:
                 report["outcome"] = "failed"
                 report["reason"] = (
                     "Typing and Notes/Finder workflows require macOS Accessibility permission for this Python host. "

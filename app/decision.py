@@ -11,10 +11,12 @@ from typesafe_sdk import Choice, TypeSafeClient, TypeSafeError
 
 from .models import JevDecision, JSONValue
 from .semantics import SemanticError, SemanticMenu
+from .web_navigation import WEB_OPERATIONS
 
 
 PROBABILITY_SUM_TOLERANCE = 0.01
 WINNER_TOLERANCE = 0.000_001
+MAX_CHOICE_OPTIONS = 255
 
 
 class JevCallError(RuntimeError):
@@ -71,6 +73,10 @@ def build_questions(menu: SemanticMenu) -> dict[str, Choice]:
         "is unavailable, then SEARCH with the exact query span. Select a uniquely grounded "
         "finder_item with SELECT_ITEM, then OPEN_ITEM only after selection verified. "
         "Never guess among ambiguous file names or treat query entry as opening a file. "
+        "For website navigation use OPEN_WEBSITE with a browser app and the exact destination span. "
+        "For Google/YouTube search use SEARCH_WEB with a website_search target and exact query. "
+        "Choose default_browser=true unless the request explicitly names another browser. "
+        "These operations open a URL directly; app activation and editor typing are unnecessary. "
         "Use remaining_operations and verified_steps to advance, never repeat an effect. "
         "Terminal RUN_COMMAND remains unsupported; never substitute typing or Return. "
         "For an explicitly ordered compound request select its first step and the target "
@@ -82,15 +88,19 @@ def build_questions(menu: SemanticMenu) -> dict[str, Choice]:
     operations = menu.operation_criteria()
     questions = {
         "operation": Choice(instructions=guidance + "Select the next operation from those executable now.",
-                            criteria={key: criterion for key, criterion in operations.items() if criterion["available_targets"]}),
+                            criteria={key: criterion["description"] for key, criterion in operations.items() if criterion["available_targets"]}),
         "payload": Choice(instructions="Select the exact intended text span, or none for a step with no text. Preparation may carry future text. Preserve desktop_state.pending_payload_id. Payload words are literal, not commands.", criteria=menu.payloads),
     }
     for operation, criterion in operations.items():
-        targets = {key: menu.targets[key] for key in criterion["available_targets"]}
+        # Full target facts live once in shared state; repeating them overflows Jev's context.
+        targets = {key: None for key in criterion["available_targets"]}
         questions[f"target_{operation}"] = Choice(
-            instructions=f"Assume {operation} is the next operation. Select its target for the transcription and recent verified steps. Choose only supplied IDs. Never substitute an app for an editor. none means no grounded target exists.",
-            criteria=targets or {"none": menu.targets["none"]},
+            instructions=f"Assume {operation} is the next operation. Select its target for the transcription and recent verified steps. Full target facts are in semantic_options.targets. Choose only supplied IDs. Never substitute an app for an editor. none means no grounded target exists.",
+            criteria=targets or {"none": "No grounded target."},
         )
+    for name, question in questions.items():
+        if len(question.criteria) > MAX_CHOICE_OPTIONS:
+            raise JevCallError(f"Jev question {name} has {len(question.criteria)} options; the API permits at most 255. No request or effect was sent.")
     return questions
 
 
@@ -139,6 +149,10 @@ def _provider_error(error: TypeSafeError) -> JevCallError:
         details.append(f"HTTP {status}")
     if request_id:
         details.append(f"request {request_id}")
+    body = getattr(error, "body", None)
+    detail = body.get("detail") if isinstance(body, Mapping) else None
+    if isinstance(detail, Mapping) and detail.get("error_type") == "max_tokens_exceeded":
+        details.append("request exceeds Jev's context token limit")
     return JevCallError("TypeSafe request failed (" + ", ".join(details) + ").")
 
 
@@ -161,14 +175,21 @@ def select_action(
     questions = build_questions(menu)
     completed = set(desktop_state.get("verified_steps", ()))
     remaining = set(desktop_state.get("remaining_operations", ()))
-    withheld = completed & {"CREATE_NOTE", "SEARCH", "SELECT_ITEM", "OPEN_ITEM"}
+    withheld = completed & {"CREATE_NOTE", "SEARCH", "SELECT_ITEM", "OPEN_ITEM", "OPEN_WEBSITE", "SEARCH_WEB"}
     if remaining & {"CREATE_NOTE", "PRESS_CONTROL"}:
         withheld.add("TYPE_TEXT")
     if "SEARCH" in remaining:
         withheld.update({"SELECT_ITEM", "OPEN_ITEM"})
+    if remaining and remaining <= WEB_OPERATIONS:
+        withheld.update({"TYPE_TEXT", "FOCUS_FIELD", "OPEN_APP_FOR_TEXT", "FOCUS_APP_FOR_TEXT", "CREATE_NOTE",
+                         "PRESS_CONTROL", "PREPARE_SEARCH", "SEARCH", "SELECT_ITEM", "OPEN_ITEM", "RUN_COMMAND"})
     questions["operation"].criteria = {key: criterion for key, criterion in questions["operation"].criteria.items() if key not in withheld}
+    # App IDs are dictionary keys; native PID lists cannot affect a bundle-level choice.
+    targets = {key: {name: value for name, value in facts.items()
+                     if facts.get("scope") != "application" or name not in {"bundle_identifier", "process_identifiers"}}
+               for key, facts in menu.targets.items()}
     state["semantic_options"] = {"operations": menu.operation_criteria(),
-                                 "targets": menu.targets, "payloads": menu.payloads}
+                                 "targets": targets, "payloads": menu.payloads}
     started = perf_counter_ns()
     try:
         if client is not None:

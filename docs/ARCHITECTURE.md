@@ -6,11 +6,11 @@ app/editor effects, and verified reports. Swift sources are retired references.
 
 ```text
 goal → sensitive-goal block → native app + bounded AX editor snapshot
-  → installed application targets + field targets + exact payload spans
+  → discovered application/browser/site targets + field targets + exact payload spans
   → one Jev request: operation / target / payload
   → validate each distribution and the combination
   → fresh identity/text/caret check → local safety / approval → fresh check
-  → native activation / control press / field focus / insertion → outcome verification
+  → native activation / HTTP URL open / control press / field focus / insertion → outcome verification
   → action history → fresh observation (four typing steps / eight workflow steps)
 
 voice: microphone callback → bounded ordered PCM queue → Nemotron streaming session
@@ -25,6 +25,8 @@ voice: microphone callback → bounded ordered PCM queue → Nemotron streaming 
 | `app/cli.py` | Input/options, approval, atomic report output, exit status. |
 | `app/runtime.py` | Bounded preparation/insertion flow, fresh checks, safety, timings, reports. |
 | `app/desktop.py` | AppKit observation/activation, app/field menus, final native guard before dispatch. |
+| `app/app_catalog.py` | Installed bundle discovery, metadata validation and familiar spoken aliases. |
+| `app/web_navigation.py` | HTTP URL normalization, search encoding and bounded browser URL observation/matching. |
 | `app/text_input.py` | Bounded AX editor discovery, identity continuity, local document/caret facts, UTF-16 replacement, guarded text/focus dispatch. |
 | `app/workflows.py` | Bounded Notes/Finder controls, local file identity, guarded menu/query/selection effects. |
 | `app/semantics.py` | Operation vocabulary, exact goal spans, combination checks, local action resolution. |
@@ -37,6 +39,36 @@ voice: microphone callback → bounded ordered PCM queue → Nemotron streaming 
 | `app/speech_runtime.py` | Capture mono audio, bound backlog, stream one decoder consumer, and commit final text at EOU. |
 
 ## Semantic authority and preparation
+
+Installed app discovery runs at desktop construction, reading standard install
+folders and nested utility folders without descending into app/framework/helper
+packages. Background-only apps are excluded; duplicate bundles merge aliases.
+Catalog candidates must still resolve through NSWorkspace at every fresh check.
+Running apps and familiar aliases supplement discovery. Ambiguous command-side
+app names fail before Jev; literal query/typing words do not authorize app actions.
+Speech-prefix aliases come from the same catalog and exclude collisions.
+
+OPEN_WEBSITE selects a browser app and an exact named-site/domain/HTTP span.
+SEARCH_WEB selects a Google/YouTube site-and-browser target and an exact query.
+Jev receives native default-browser facts; neither operation needs address-bar
+typing or Return. Local normalization rejects credentials, non-HTTP schemes,
+invalid domains/ports and control characters. Search uses URL encoding, and
+command-like query words stay literal. Finder SEARCH remains separate.
+Web-only goals withdraw editor, Finder and control effects from Jev's executable
+operation Choice; a mistaken typing answer cannot insert a query into a document.
+The executor rechecks foreground identity and browser installation immediately
+before NSWorkspace's URL request. One failed/unverified request is never replayed.
+
+Browser URL observation stays local: window AXURL/AXDocument or one unique
+AXWebArea URL, with 128 nodes/one second and no arbitrary link/page-text reads.
+AXURL's documented CFURL/NSURL values and string-valued browser attributes are supported.
+Verification requires the chosen foreground browser and exact normalized URL;
+search accepts extra parameters while requiring the same site/path/exact query.
+Missing AX permission/URL evidence or redirects remain unverified; OS handoff
+alone does not prove navigation, search results or page-load completion.
+Read-only native acceptance found 251 installed targets and Safari as the default
+browser on 2026-10-11; this host has no AX permission. `.build/web-e2e.json`
+proves the offline CLI/voice paths and failure boundaries, not live browser compatibility.
 
 All operations remain visible independently of local verb recognition. Installed
 catalog apps plus the current foreground app are targets. TextEdit is in the
@@ -60,6 +92,22 @@ Normalize accepted totals to one without changing factor confidence. Record raw
 total/count/normalization per factor, including factor-specific rejection details.
 Minimum factor confidence drives approval; independent factors are not a joint
 probability. Incompatible choices reject the whole decision without fallback effects.
+
+Target question criteria contain allowed IDs with null descriptions; full facts
+live once in shared semantic_options.targets. Operation criteria contain their
+descriptions, retaining compatibility lists in shared state. Redundant bundle IDs
+and native PID lists are omitted only from provider application facts; local
+resolution, identity checks and schema-3 reports retain the complete metadata.
+Repeating a 263-app catalog across speculative heads caused HTTP 400 context
+overflow. Jev 1.13 permits 64k total input tokens and 32k for state plus the longest
+question; each Choice permits 255 options. Oversized Choice menus fail locally
+without truncation. Recognized max_tokens_exceeded error codes produce a static
+context-limit reason; raw provider bodies remain excluded from reports.
+`.build/request-e2e.json` checks serialization growth, unchanged target selection
+and safe failures. Live synthetic reproduction rejected the old 362,749-byte
+request and accepted the compact 121,189-byte Notes dry run (40,190 input tokens).
+`.build/request-limit-reproduction.json` and `.build/live-request-e2e.json` retain
+that evidence without establishing native app compatibility.
 
 OPEN_APP/FOCUS_APP are one-action only when no recognized effect remains. Explicit
 OPEN_APP_FOR_TEXT/FOCUS_APP_FOR_TEXT request activation followed by fresh editor
