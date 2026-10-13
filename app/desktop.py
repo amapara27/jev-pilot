@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 import re
 from time import monotonic
 
@@ -10,13 +11,13 @@ from AppKit import NSWorkspace, NSWorkspaceOpenConfiguration
 from Foundation import NSDate, NSRunLoop, NSBundle, NSURL
 
 from .models import ActionCandidate
-from .semantics import SemanticMenu, extract_payloads
+from .semantics import SemanticMenu, extract_payloads, required_workflow_operations
 from .text_input import NativeText, TextField, TextInputError
 from .workflows import NativeWorkflows, WorkflowTarget, WORKFLOW_KINDS, file_identity
 from .verification import selected_notes
 from .app_catalog import APP_ALIASES, APPLICATION_ROOTS, discover_applications
 from .web_navigation import BROWSER_BUNDLES, SEARCH_SITES, WEB_OPERATIONS, browser_url, normalize_web_url
-from .interactions import NativeInteractions, InteractionTarget
+from .interactions import NativeInteractions, InteractionTarget, WINDOW_COMMANDS
 
 
 @dataclass(frozen=True)
@@ -132,17 +133,22 @@ class MacDesktop:
                 fields = self.text.scan(active.pid, active.bundle_id, application, window)
                 diagnostics.update(self.text.diagnostics)
                 workflow_targets = self.workflows.scan(active.pid, active.bundle_id, application, window)
+                diagnostics.update(self.text.diagnostics)
+                diagnostics['workflow_discovery'] = dict(self.workflows.diagnostics)
                 resolved = file_identity(self.text.read(window, "AXDocument") or self.text.read(window, "AXURL"))
                 document_url = resolved[0] if resolved else None
                 if active.bundle_id in BROWSER_BUNDLES or active.bundle_id == self.default_browser():
                     current_browser_url = browser_url(self.text, window)
         state = DesktopState(active, running, trusted, focused, fields, diagnostics, workflow_targets, document_url, current_browser_url)
         if trusted and focused and getattr(self, 'interaction_commands', ()):
-            state = replace(state, interaction_targets=self.interactions.scan(state, application, window))
+            interactions = self.interactions.scan(state, application, window, self.interaction_commands)
+            diagnostics.update(self.text.diagnostics)
+            diagnostics['interaction_discovery'] = dict(self.interactions.diagnostics)
+            state = replace(state, interaction_targets=interactions, editor_diagnostics=dict(diagnostics))
         return state
 
     def semantic_menu(self, goal: str, state: DesktopState) -> SemanticMenu:
-        """Ground all supported installed apps without locally classifying the goal."""
+        """Ground installed apps and native targets, binding explicit app/workflow scope."""
 
         payloads = extract_payloads(goal)
         targets = {"none": {"description": "No grounded target."}}
@@ -197,7 +203,75 @@ class MacDesktop:
         for item in state.interaction_targets:
             if item.command in getattr(self, 'interaction_commands', ()):
                 targets[item.id] = item.provider_target()
-        return SemanticMenu(goal, targets, payloads)
+        intent = self.command_intent(goal, targets, state)
+        return SemanticMenu(goal, targets, payloads, intent)
+
+    def command_intent(self, goal, targets, state):
+        """Bind exact named apps and supported workflows; keep arbitrary typing unchanged."""
+
+        required = required_workflow_operations(goal)
+        masked = re.sub(r'"(?:\\.|[^"\\])*"|“[^”]*”|(?<!\w)\x27[^\x27]*\x27(?!\w)', lambda match: ' ' * len(match.group()), goal)
+        if re.search(r'\bnew\s+terminal\s+window\b', masked, re.I):
+            return {'mode':'unsupported', 'bundle':None, 'operations':['STOP', 'UNSUPPORTED']}
+        app = re.fullmatch(r'\s*(?:please\s+)?(?:open|launch|focus|switch\s+to|go\s+to)\s+(.+?)\s*[.!?]*', goal, re.I)
+        if app and not required:
+            name = app.group(1).strip(' .!?"“”\x27').casefold()
+            names = [key for key, facts in targets.items() if facts.get('scope') == 'application'
+                     and name in {key.casefold(), facts['name'].casefold(), *facts['aliases']}]
+            if len(names) != 1:
+                files = [facts for facts in targets.values() if facts.get('scope') == 'finder_item'
+                         and name in {facts['label'].casefold(), Path(facts['label']).stem.casefold()}]
+                if not names and len(files) == 1 and not files[0]['ambiguous']:
+                    return {'mode':'workflow', 'bundle':'com.apple.finder', 'operations':['SELECT_ITEM', 'OPEN_ITEM', 'STOP', 'UNSUPPORTED']}
+                if re.search(r',|\band\b|\bnot\b', name):
+                    return {}
+                raise DesktopError('No unique installed app exactly matches the requested name; no app was guessed.')
+            return {'mode':'app', 'bundle':names[0], 'operations':['OPEN_APP', 'FOCUS_APP', 'STOP', 'UNSUPPORTED']}
+        bundle = None
+        if 'CREATE_NOTE' in required:
+            bundle = 'com.apple.Notes'
+        elif 'SEARCH' in required and (re.search(r'\bfinder\b', masked, re.I) or state.active and state.active.bundle_id == 'com.apple.finder'):
+            bundle = 'com.apple.finder'
+        elif re.search(r'\b(?:create|make|open)\s+(?:a\s+)?new\s+document\b', masked, re.I):
+            bundle = 'com.apple.TextEdit'
+        if bundle:
+            named = re.search(r'\bin\s+(.+?)(?=\s+(?:and|then|type|write|dictate|insert)\b|[.!?]*$)', masked, re.I)
+            if named:
+                name = named.group(1).strip(' .!?').casefold()
+                matches = [key for key, facts in targets.items() if facts.get('scope') == 'application'
+                           and name in {key.casefold(), facts['name'].casefold(), *facts['aliases']}]
+                if matches and matches != [bundle]:
+                    return {'mode':'unsupported', 'bundle':None, 'operations':['STOP', 'UNSUPPORTED']}
+        if bundle:
+            operations = {'OPEN_APP', 'FOCUS_APP', 'OPEN_APP_FOR_WORKFLOW', 'FOCUS_APP_FOR_WORKFLOW',
+                          'OPEN_APP_FOR_TEXT', 'FOCUS_APP_FOR_TEXT', 'FOCUS_FIELD', 'STOP', 'UNSUPPORTED'}
+            if bundle == 'com.apple.Notes':
+                operations.update({'CREATE_NOTE', 'TYPE_TEXT', 'KEYBOARD_ACTION', 'SCROLL'})
+            elif bundle == 'com.apple.finder':
+                operations.update({'PREPARE_SEARCH', 'SEARCH', 'SELECT_ITEM', 'OPEN_ITEM'})
+            else:
+                operations.update({'PRESS_CONTROL', 'TYPE_TEXT', 'KEYBOARD_ACTION', 'SCROLL'})
+            return {'mode':'workflow', 'bundle':bundle, 'operations':sorted(operations)}
+        if {'PRESS_CONTROL', 'TYPE_TEXT'} <= required and state.active:
+            return {'mode':'workflow', 'bundle':state.active.bundle_id,
+                    'operations':['PRESS_CONTROL', 'FOCUS_FIELD', 'TYPE_TEXT', 'KEYBOARD_ACTION', 'SCROLL', 'STOP', 'UNSUPPORTED']}
+        window_goal = re.fullmatch(r'\s*(?:please\s+)?(?:minimi[zs]e|maximi[zs]e|enter\s+full\s*screen)\s+(?:in\s+)?(.+?)\s*[.!?]*', masked, re.I)
+        if window_goal and state.active:
+            name = window_goal.group(1).strip(' .!?').casefold()
+            if name not in {'window', 'app', 'application', 'this window', 'the window', 'current window', 'this app', 'the app', 'current app', 'it'}:
+                name = re.sub(r'\s+(?:window|app|application)$', '', name)
+                matches = [key for key, facts in targets.items() if facts.get('scope') == 'application'
+                           and name in {key.casefold(), facts['name'].casefold(), *facts['aliases']}]
+                if len(matches) != 1:
+                    raise DesktopError('No unique installed app matches the requested window action; no other window was chosen.')
+                return {'mode':'workflow', 'bundle':matches[0],
+                        'operations':['FOCUS_APP_FOR_WORKFLOW', 'KEYBOARD_ACTION', 'STOP', 'UNSUPPORTED']}
+        if getattr(self, 'interaction_commands', ()) and state.active and 'TYPE_TEXT' not in required:
+            return {'mode':'interaction', 'bundle':state.active.bundle_id,
+                    'operations':['KEYBOARD_ACTION', 'SCROLL', 'FOCUS_FIELD', 'STOP', 'UNSUPPORTED']}
+        if re.search(r'\b(?:close|quit)\s+.+', masked, re.I) or re.search(r'\bnew\s+terminal\s+window\b', masked, re.I):
+            return {'mode':'unsupported', 'bundle':None, 'operations':['STOP', 'UNSUPPORTED']}
+        return {}
 
     def validate_action(self, action: ActionCandidate, before: DesktopState, fresh: DesktopState) -> None:
         """Bind a typing/focus effect to exact local AX identity and current text facts."""
@@ -205,9 +279,10 @@ class MacDesktop:
         if before.active != fresh.active or fresh.active is None:
             raise DesktopError("The foreground app changed while deciding or approving.")
         if action.kind in {'KEYBOARD_ACTION', 'SCROLL'}:
-            if before.browser_url != fresh.browser_url:
+            window_command = action.parameters.get('command') in WINDOW_COMMANDS
+            if not window_command and before.browser_url != fresh.browser_url:
                 raise TextInputError('The browser page changed before the command; no effect was sent.')
-            if fresh.active.bundle_id == 'com.apple.Notes' and selected_notes(before) != selected_notes(fresh):
+            if not window_command and fresh.active.bundle_id == 'com.apple.Notes' and selected_notes(before) != selected_notes(fresh):
                 raise TextInputError('The selected note changed before the command; no effect was sent.')
             identifier = action.parameters['element_id']
             original = next((item for item in before.interaction_targets if item.id == identifier), None)
@@ -255,7 +330,7 @@ class MacDesktop:
                     return False
                 application = self.text.ax.AXUIElementCreateApplication(target.pid)
                 return (self.text.equal(self.text.read(application, 'AXFocusedWindow'), target.window)
-                        and self.text.equal(self.text.read(application, 'AXFocusedUIElement'), target.focused))
+                        and (not target.focus_sensitive or self.text.equal(self.text.read(application, 'AXFocusedUIElement'), target.focused)))
 
             self.interactions.execute(target, guard)
             return
@@ -265,7 +340,15 @@ class MacDesktop:
                 self.validate_action(action, self.validated_state, fresh)
             except DesktopError as error:
                 raise TextInputError(str(error), effect_sent=False) from error
-            self.workflows.execute(action, fresh)
+            target = next(item for item in fresh.workflow_targets if item.id == action.parameters['element_id'])
+
+            def guard():
+                frontmost = self.workspace.frontmostApplication()
+                application = self.text.ax.AXUIElementCreateApplication(fresh.active.pid)
+                return (frontmost is not None and int(frontmost.processIdentifier()) == fresh.active.pid
+                        and self.text.equal(self.text.read(application, 'AXFocusedWindow'), target.window))
+
+            self.workflows.execute(action, fresh, guard)
             return
         if action.kind in {"TYPE_TEXT", "FOCUS_FIELD"}:
             fresh = self.snapshot()

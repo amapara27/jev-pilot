@@ -175,6 +175,7 @@ def select_action(
     # Every question receives the same local facts, so even independent answers can
     # consider the full compatibility menu without relying on another answer.
     questions = build_questions(menu)
+    state['command_context'] = menu.intent
     completed = set(desktop_state.get("verified_steps", ()))
     remaining = set(desktop_state.get("remaining_operations", ()))
     withheld = completed & {"CREATE_NOTE", "SEARCH", "SELECT_ITEM", "OPEN_ITEM", "OPEN_WEBSITE", "SEARCH_WEB"}

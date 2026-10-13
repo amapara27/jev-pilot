@@ -6,10 +6,10 @@ import math
 import re
 from time import monotonic
 
-from AppKit import NSPasteboard
+from AppKit import NSPasteboard, NSPasteboardTypeString
 from Quartz import kCGEventFlagMaskShift
 
-from .text_input import TextInputError, expected_insertion, native_true, utf16_length
+from .text_input import MAX_VALUE_CHARACTERS, TextInputError, expected_insertion, native_true, utf16_length
 
 
 # Menu actions must exist and be enabled in the foreground app.
@@ -27,15 +27,23 @@ MENU_LABELS = {
 }
 TEXT_COMMANDS = {'select_all', 'copy', 'cut', 'paste', 'undo', 'redo', 'enter'}
 BROWSER_COMMANDS = set(MENU_LABELS) - TEXT_COMMANDS - {'find'}
+WINDOW_COMMANDS = {'minimize': 'AXMinimized', 'maximize': 'AXFullScreen'}
+MENU_BRANCHES = {'file': {'new_tab', 'close_tab', 'address_bar'},
+                 'edit': TEXT_COMMANDS | {'find'},
+                 'view': {'zoom_in', 'zoom_out', 'reset_zoom', 'reload'},
+                 'history': {'back', 'forward', 'reopen_tab'},
+                 'window': {'next_tab', 'previous_tab'}}
 PATTERNS = [
+    ('minimize', r'minimi[zs]e'), ('maximize', r'(?:maximi[zs]e|enter\s+full\s*screen)'),
     ('enter', r'(?:press|hit)\s+(?:the\s+)?(?:enter|return)(?:\s+key)?'),
     ('select_all', r'select\s+all(?:\s+text)?'),
     ('reopen_tab', r'reopen\s+(?:the\s+)?(?:last\s+)?(?:closed\s+)?tab'),
     ('close_tab', r'close\s+(?:(?:this|the|current)\s+)?tab'),
     ('new_tab', r'(?:open\s+)?(?:a\s+)?new\s+tab'),
-    ('next_tab', r'(?:go\s+to\s+)?(?:the\s+)?next\s+tab'),
-    ('previous_tab', r'(?:go\s+to\s+)?(?:the\s+)?previous\s+tab'),
-    ('back', r'go\s+back'), ('forward', r'go\s+forward'),
+    ('next_tab', r'(?:(?:go|switch)\s+to\s+)?(?:the\s+)?next\s+tab'),
+    ('previous_tab', r'(?:(?:go\s+back|go|switch)\s+to\s+)?(?:the\s+)?previous\s+tab'),
+    ('select_tab', r'(?:switch\s+(?:to|the)|(?:click|select)(?:\s+on)?)\s+(?:the\s+)?(?!next\b|previous\b).+?\s+tab'),
+    ('back', r'go\s+back(?!\s+to\s+(?:the\s+)?(?:previous|next)\s+tab)'), ('forward', r'go\s+forward'),
     ('address_bar', r'(?:focus|select)\s+(?:the\s+)?address\s+bar'),
     ('zoom_in', r'zoom\s+in'), ('zoom_out', r'zoom\s+out'),
     ('reset_zoom', r'reset\s+zoom'), ('reload', r'(?:reload|refresh)(?:\s+(?:this|the)\s+page)?'),
@@ -58,7 +66,7 @@ def command_actions(goal, *, with_positions=False):
     if literal:
         tail = masked[literal.end():]
         # shortcut: unquoted command tails need an explicit connector; quote literal tails.
-        boundary = re.search(r'\s+(?:and(?:\s+then)?|then)\s+(?=(?:press|hit|select all|scroll|go to the|copy\b|cut\b|paste\b|undo\b|redo\b|close\b|reload\b|zoom\b))', tail, re.I) if literal.group().strip().casefold() in {'type', 'write', 'dictate', 'insert'} else None
+        boundary = re.search(r'\s+(?:and(?:\s+then)?|then)\s+(?=(?:press|hit|select all|scroll|go to the|copy\b|cut\b|paste\b|undo\b|redo\b|close\b|reload\b|zoom\b|minimi[zs]e\b|maximi[zs]e\b|enter\s+full\s*screen\b))', tail, re.I) if literal.group().strip().casefold() in {'type', 'write', 'dictate', 'insert'} else None
         masked = masked[:literal.start()] + ' ' * ((literal.end() + boundary.end() if boundary else len(masked)) - literal.start()) + (tail[boundary.end():] if boundary else '')
     matches = []
     for command, pattern in PATTERNS:
@@ -105,15 +113,21 @@ class InteractionTarget:
     area_label: str = ''
     tabs: tuple = field(default=(), compare=False, repr=False)
     pages: tuple = field(default=(), compare=False, repr=False)
-    page_busy: bool = False
-    reset_zoom_enabled: bool | None = None
+    page_busy: bool = field(default=False, compare=False)
+    reset_zoom_enabled: bool | None = field(default=None, compare=False)
+    focus_sensitive: bool = True
+    clipboard_text: str | None = field(default=None, compare=False, repr=False)
+    zoom: float | None = field(default=None, compare=False)
+    samples: tuple = field(default=(), compare=False, repr=False)
+    window_attribute: str = ''
+    window_value: bool | None = None
 
     def provider_target(self):
         """Expose command capabilities without native handles or document values."""
 
         return {'scope': 'interaction', 'command': self.command, 'bundle_identifier': self.bundle,
                 'process_identifier': self.pid, 'label': self.menu_label or self.area_label or self.command.replace('_', ' '),
-                'field_id': self.field_id, 'requires_confirmation': self.command in {'cut', 'paste', 'close_tab'} or
+                'field_id': self.field_id, 'requires_confirmation': self.command in {'cut', 'close_tab'} or
                 self.command == 'enter' and not (self.editor and self.editor.role == 'AXTextArea' and self.bundle in {'com.apple.TextEdit', 'com.apple.Notes'})}
 
 
@@ -125,29 +139,42 @@ class NativeInteractions:
         self.pasteboard = pasteboard if pasteboard is not None else NSPasteboard.generalPasteboard()
         self.previous = ()
         self.next_id = 0
+        self.diagnostics = {}
 
     def clipboard_count(self):
         """Observe clipboard change identity without reading its contents."""
 
         return int(self.pasteboard.changeCount())
 
-    def scan(self, state, application, window):
+    def scan(self, state, application, window, commands=()):
         """Collect enabled menu commands and scroll ranges within a bounded AX walk."""
 
         text, ax = self.text, self.text.ax
         text.scan_deadline = monotonic() + 0.5
-        focused = text.read(application, 'AXFocusedUIElement')
-        if focused is None or not text.safe_ancestry(focused):
+        focus_error, focused = ax.AXUIElementCopyAttributeValue(application, 'AXFocusedUIElement', None)
+        focus_safe = focused is not None and text.safe_ancestry(focused)
+        self.diagnostics = {'focused_element_ax_error': int(focus_error), 'focused_element_available': focused is not None,
+                            'focused_element_safe': focus_safe}
+        if not text.safe_ancestry(window):
+            self.diagnostics['window_safe'] = False
             return ()
-        editor = next((item for item in state.text_fields if item.focused and item.can_type), None)
+        self.diagnostics['window_safe'] = True
+        if not focus_safe:
+            focused = None
+        editor = next((item for item in state.text_fields if focus_safe and item.focused and item.can_type and text.equal(item.element, focused)), None)
         menus, areas, visited, tabs, pages = {}, [], [], [], []
         page_busy = False
         reset_zoom_enabled = None
-        queue = deque([text.read(application, 'AXMenuBar'), window])
+        zoom, samples = None, []
+        branches = {branch for branch, names in MENU_BRANCHES.items() if not commands or set(commands) & names}
+        menu_error, menu = ax.AXUIElementCopyAttributeValue(application, 'AXMenuBar', None)
+        self.diagnostics['menu_bar_ax_error'] = int(menu_error)
+        queue = deque([menu, window] if branches else [window])
+        deferred = deque()
         deadline = monotonic() + 0.5
         text.scan_deadline = deadline
-        while queue and len(visited) < 256 and monotonic() < deadline:
-            node = queue.popleft()
+        while (queue or deferred) and len(visited) < 256 and monotonic() < deadline:
+            node = (queue or deferred).popleft()
             if node is None or any(text.equal(node, old) for old in visited):
                 continue
             visited.append(node)
@@ -158,14 +185,27 @@ class NativeInteractions:
                 pages.append(node)
                 page_busy = page_busy or native_true(text.read(node, 'AXBusy'))
             if role == 'AXTabGroup':
-                for tab in list(text.read(node, 'AXChildren') or ())[:64]:
-                    tabs.append((tab, native_true(text.read(tab, 'AXSelected')) or native_true(text.read(tab, 'AXValue'))))
+                for tab in list(text.read(node, 'AXTabs') or text.read(node, 'AXChildren') or ())[:64]:
+                    if text.read(tab, 'AXRole') in {'AXRadioButton', 'AXTab'} or text.read(tab, 'AXSubrole') == 'AXTabButton':
+                        tabs.append((tab, native_true(text.read(tab, 'AXSelected')) or native_true(text.read(tab, 'AXValue'))))
+            label = str(text.read(node, 'AXTitle') or text.read(node, 'AXDescription') or '')[:240].casefold().strip()
+            if role == 'AXMenuBarItem' and label not in branches:
+                continue
+            if role in {'AXButton', 'AXPopUpButton', 'AXTextField'} and 'zoom' in label:
+                match = re.fullmatch(r'\s*(\d+(?:\.\d+)?)\s*%\s*', str(text.read(node, 'AXValue') or text.read(node, 'AXValueDescription') or ''))
+                if match:
+                    zoom = float(match.group(1))
+            if role in {'AXHeading', 'AXStaticText', 'AXImage'} and pages and len(samples) < 8:
+                position = self.geometry(node, 'AXPosition', getattr(ax, 'kAXValueCGPointType', 1))
+                size = self.geometry(node, 'AXSize', getattr(ax, 'kAXValueCGSizeType', 2))
+                if position and size:
+                    samples.append((node, position, size))
             if role == 'AXMenuItem' and str(text.read(node, 'AXTitle') or '').casefold() == 'actual size':
                 enabled = text.read(node, 'AXEnabled')
                 if isinstance(enabled, (bool, int)):
                     reset_zoom_enabled = native_true(enabled)
-            if role == 'AXMenuItem' and native_true(text.read(node, 'AXEnabled')):
-                label = str(text.read(node, 'AXTitle') or '')[:240].casefold().strip()
+            enabled_error, enabled = ax.AXUIElementCopyAttributeValue(node, 'AXEnabled', None) if role == 'AXMenuItem' else (0, False)
+            if role == 'AXMenuItem' and (enabled_error == -25205 or enabled_error == 0 and native_true(enabled)):
                 error, actions = ax.AXUIElementCopyActionNames(node, None)
                 if error == 0 and 'AXPress' in (actions or ()):
                     for command, labels in MENU_LABELS.items():
@@ -177,26 +217,48 @@ class NativeInteractions:
                     areas.append(node)
             if role not in {'AXTextArea', 'AXTextField', 'AXTable', 'AXList', 'AXOutline'}:
                 children = text.read(node, 'AXChildren') or ()
-                queue.extend(list(children)[:max(0, 256 - len(queue))])
+                pending = list(children)[:max(0, 256 - len(queue) - len(deferred))]
+                if role == 'AXWebArea':
+                    deferred.extend(pending)
+                elif not commands or set(commands) - WINDOW_COMMANDS.keys():
+                    queue.extendleft(reversed(pending))
+            if len(visited) == 128 and not any(text.equal(window, old) for old in visited):
+                queue.appendleft(window)
         candidates = []
+        self.diagnostics.update(visited_nodes=len(visited), scan_limit_reached=bool(queue or deferred),
+                                menu_command_count=len(menus), scroll_area_count=len(areas), tab_count=len(tabs))
 
         def add(command, element, **kwargs):
             old = next((item for item in self.previous if item.pid == state.active.pid and item.command == command and text.equal(item.element, element)), None)
             identifier = old.id if old else f'interaction_{self.next_id}'
             if not old:
                 self.next_id += 1
+            sensitive = command in TEXT_COMMANDS | {'tab', 'shift_tab', 'escape'}
+            bound_editor = editor if command in TEXT_COMMANDS else None
             candidates.append(InteractionTarget(identifier, command, state.active.pid, state.active.bundle_id,
-                                                element, window, focused, editor=editor,
-                                                field_id=editor.id if editor else None, tabs=tuple(tabs), pages=tuple(pages),
-                                                page_busy=page_busy, reset_zoom_enabled=reset_zoom_enabled, **kwargs))
+                                                element, window, focused, editor=bound_editor,
+                                                field_id=bound_editor.id if bound_editor else None, tabs=tuple(tabs), pages=tuple(pages),
+                                                page_busy=page_busy, reset_zoom_enabled=reset_zoom_enabled, focus_sensitive=sensitive,
+                                                zoom=zoom, samples=tuple(samples), **kwargs))
 
         terminal = state.active.bundle_id in {'com.apple.Terminal', 'com.googlecode.iterm2'}
+        self.diagnostics['window_control_checks'] = []
+        for command, attribute in WINDOW_COMMANDS.items():
+            error, value = ax.AXUIElementCopyAttributeValue(window, attribute, None)
+            readable = error == 0 and isinstance(value, (bool, int)) and value in (0, 1)
+            writable = text.settable(window, attribute)
+            self.diagnostics['window_control_checks'].append({'command': command, 'attribute_ax_error': int(error),
+                                                              'readable_boolean': readable, 'writable': writable})
+            if readable and writable:
+                add(command, window, window_attribute=attribute, window_value=bool(value))
         if editor and not terminal:
             if editor.value and text.settable(editor.element, 'AXSelectedTextRange'):
                 add('select_all', editor.element)
             add('enter', editor.element)
         if not terminal:
             for command, items in menus.items():
+                if commands and command not in commands:
+                    continue
                 if len(items) != 1:
                     continue
                 if command in TEXT_COMMANDS and not editor:
@@ -209,12 +271,30 @@ class NativeInteractions:
                     from .web_navigation import BROWSER_BUNDLES
                     if state.active.bundle_id not in BROWSER_BUNDLES:
                         continue
-                add(command, items[0][0], menu_label=items[0][1], clipboard_count=self.clipboard_count() if command in {'copy', 'cut', 'paste'} else None)
+                clipboard_text = None
+                clipboard_count = self.clipboard_count() if command in {'copy', 'cut', 'paste'} else None
+                if command == 'paste':
+                    value = self.pasteboard.stringForType_(NSPasteboardTypeString)
+                    if self.clipboard_count() != clipboard_count or not isinstance(value, str) or not value or len(value) > MAX_VALUE_CHARACTERS:
+                        continue
+                    if len(expected_insertion(editor.value, editor.selection, value)) > MAX_VALUE_CHARACTERS:
+                        continue
+                    clipboard_text = value
+                add(command, items[0][0], menu_label=items[0][1], clipboard_count=clipboard_count,
+                    clipboard_text=clipboard_text)
+            if state.active.bundle_id == 'com.apple.Safari':
+                for tab, selected in tabs:
+                    error, actions = ax.AXUIElementCopyActionNames(tab, None)
+                    if not selected and error == 0 and 'AXPress' in (actions or ()):
+                        add('select_tab', tab, menu_label=str(text.read(tab, 'AXTitle') or text.read(tab, 'AXDescription') or 'Browser tab')[:240])
             # Tab and Escape require a readable accessible focus, never Terminal.
-            for command in ('tab', 'shift_tab', 'escape'):
-                add(command, focused)
+            if focus_safe:
+                for command in ('tab', 'shift_tab', 'escape'):
+                    add(command, focused)
         ancestor = focused
         for _ in range(32):
+            if ancestor is None:
+                break
             containing = next((area for area in areas if text.equal(area, ancestor)), None)
             if containing is not None:
                 areas = [containing]
@@ -229,13 +309,17 @@ class NativeInteractions:
             point = (position[0] + size[0] / 2, position[1] + size[1] / 2)
             label = str(text.read(area, 'AXDescription') or text.read(area, 'AXTitle') or 'Scrollable area')[:240]
             for attribute, directions in [('AXVerticalScrollBar', ('up', 'down')), ('AXHorizontalScrollBar', ('left', 'right'))]:
-                bar = text.read(area, attribute)
+                bar = self.scrollbar(area, attribute)
                 if bar is None:
                     continue
                 enabled = text.read(bar, 'AXEnabled')
                 if enabled is not None and not native_true(enabled):
                     continue
                 value, minimum, maximum = (text.read(bar, key) for key in ('AXValue', 'AXMinValue', 'AXMaxValue'))
+                missing_range = minimum is None and maximum is None and all(ax.AXUIElementCopyAttributeValue(bar, key, None)[0] == -25205 for key in ('AXMinValue', 'AXMaxValue'))
+                if missing_range and state.active.bundle_id == 'com.apple.Safari' and text.read(bar, 'AXRole') == 'AXScrollBar':
+                    # WebKit exposes standard scrollbars as currentPos/maximum, not min/max attributes.
+                    minimum, maximum = 0, 1
                 if not all(isinstance(v, (float, int)) and not isinstance(v, bool) and math.isfinite(v) for v in (value, minimum, maximum)) or not minimum <= value <= maximum or minimum == maximum:
                     continue
                 for direction, available in zip(directions, (value > minimum, value < maximum)):
@@ -247,6 +331,17 @@ class NativeInteractions:
                                 add('scroll_top' if direction == 'up' else 'scroll_bottom', area, bar=bar, value=value, minimum=minimum, maximum=maximum, point=point, area_label=label)
         self.previous = tuple(candidates)
         return self.previous
+
+    def scrollbar(self, area, attribute):
+        """Accept one native axis scrollbar, including child-only WebKit exposure."""
+
+        bar = self.text.read(area, attribute)
+        if bar is not None:
+            return bar
+        orientation = 'AXHorizontalOrientation' if attribute == 'AXHorizontalScrollBar' else 'AXVerticalOrientation'
+        bars = [node for node in list(self.text.read(area, 'AXChildren') or ())[:64]
+                if self.text.read(node, 'AXRole') == 'AXScrollBar' and self.text.read(node, 'AXOrientation') == orientation]
+        return bars[0] if len(bars) == 1 else None
 
     def geometry(self, node, attribute, kind):
         """Decode native CGPoint/CGSize without guessing a target position."""
@@ -266,9 +361,9 @@ class NativeInteractions:
 
         text = self.text
         return (original == current and all(text.equal(a, b) for a, b in
-                [(original.element, current.element), (original.window, current.window), (original.focused, current.focused)])
-                and self.same_tabs(original.tabs, current.tabs)
-                and len(original.pages) == len(current.pages) and all(text.equal(a, b) for a, b in zip(original.pages, current.pages))
+                [(original.element, current.element), (original.window, current.window)])
+                and (not original.focus_sensitive or text.equal(original.focused, current.focused))
+                and (original.command in TEXT_COMMANDS or original.command in WINDOW_COMMANDS or self.same_tabs(original.tabs, current.tabs))
                 and (original.bar is None and current.bar is None or original.bar is not None and current.bar is not None and text.equal(original.bar, current.bar))
                 and (original.editor is None and current.editor is None or original.editor is not None and current.editor is not None and text.same_target(original.editor, current.editor, typing=True)))
 
@@ -281,9 +376,18 @@ class NativeInteractions:
     def execute(self, target, guard):
         """Dispatch one selection/menu command or paired key/wheel event, without retries."""
 
+        if target.window_attribute:
+            if not guard():
+                raise TextInputError('The foreground window changed before the window action.')
+            error = self.text.ax.AXUIElementSetAttributeValue(target.window, target.window_attribute, True)
+            if error:
+                raise TextInputError('The native window action failed; it was not retried.', effect_sent=True)
+            return
         if target.menu_label:
             if not guard():
                 raise TextInputError('The foreground or focus changed before the command.')
+            if target.command == 'paste' and self.clipboard_count() != target.clipboard_count:
+                raise TextInputError('The clipboard changed before paste; no effect was sent.')
             error = self.text.ax.AXUIElementPerformAction(target.element, 'AXPress')
             if error != 0:
                 raise TextInputError('The enabled menu command failed; it was not retried.', effect_sent=True)
@@ -337,6 +441,14 @@ class NativeInteractions:
     def verified(self, target, before, state):
         """Require a concrete native effect; delivery alone never proves completion."""
 
+        if not state.ax_trusted:
+            return False
+        if target.window_attribute:
+            application = self.text.ax.AXUIElementCreateApplication(target.pid)
+            windows = self.text.read(application, 'AXWindows')
+            present = windows is not None and any(self.text.equal(window, target.window) for window in windows)
+            return bool(present and native_true(self.text.read(target.window, target.window_attribute))
+                        and (target.command == 'minimize' or state.active == before.active))
         if state.active != before.active:
             return False
         if target.command.startswith('scroll_'):
@@ -344,7 +456,7 @@ class NativeInteractions:
             if not self.text.equal(self.text.read(application, 'AXFocusedWindow'), target.window):
                 return False
             attribute = 'AXHorizontalScrollBar' if target.command.startswith(('scroll_left', 'scroll_right')) else 'AXVerticalScrollBar'
-            current_bar = self.text.read(target.element, attribute)
+            current_bar = self.scrollbar(target.element, attribute)
             if current_bar is None or not self.text.equal(current_bar, target.bar):
                 return False
             value = self.text.read(target.bar, 'AXValue')
@@ -367,20 +479,48 @@ class NativeInteractions:
         if target.command in {'copy', 'cut'}:
             clipboard_changed = self.clipboard_count() != target.clipboard_count
             return clipboard_changed and (bool(same and current.value == original.value and current.selection == original.selection) if target.command == 'copy' else bool(same and current.value == expected_insertion(original.value, original.selection, '') and current.selection == (original.selection[0], 0)))
-        if target.command in {'paste', 'undo', 'redo'}:
+        if target.command == 'paste':
+            return bool(same and current.value == expected_insertion(original.value, original.selection, target.clipboard_text)
+                        and current.selection == (original.selection[0] + utf16_length(target.clipboard_text), 0))
+        if target.command in {'undo', 'redo'}:
             return bool(same and current.value != original.value)
-        if target.command == 'close_tab' and not state.focused_window_available:
-            return True
+        if target.command == 'close_tab':
+            application = self.text.ax.AXUIElementCreateApplication(target.pid)
+            windows = self.text.read(application, 'AXWindows')
+            if windows is not None and all(not self.text.equal(window, target.window) for window in windows):
+                return True
         observed = next((item for item in state.interaction_targets if item.id == target.id), None)
+        if observed is None and target.command in BROWSER_COMMANDS | {'select_tab'}:
+            observed = next((item for item in state.interaction_targets if item.pid == target.pid and self.text.equal(item.window, target.window)), None)
         if observed:
-            if target.command in {'new_tab', 'close_tab', 'reopen_tab', 'next_tab', 'previous_tab'} and not self.same_tabs(target.tabs, observed.tabs):
+            if target.command in BROWSER_COMMANDS | {'select_tab'} and not self.text.equal(target.window, observed.window):
+                return False
+            if target.command in {'new_tab', 'close_tab', 'reopen_tab'}:
+                if target.command == 'close_tab' and len(observed.tabs) < len(target.tabs):
+                    return True
+                if target.command != 'close_tab' and len(observed.tabs) > len(target.tabs):
+                    return True
+            if target.command in {'next_tab', 'previous_tab'} and len(target.tabs) == len(observed.tabs) and not self.same_tabs(target.tabs, observed.tabs):
+                return True
+            if target.command == 'select_tab' and any(self.text.equal(tab, target.element) and selected for tab, selected in observed.tabs):
                 return True
             if target.command == 'reload' and (not target.page_busy and observed.page_busy or len(target.pages) == len(observed.pages) == 1 and not self.text.equal(target.pages[0], observed.pages[0])):
                 return True
             if target.command in {'zoom_in', 'zoom_out', 'reset_zoom'} and target.reset_zoom_enabled is not None and observed.reset_zoom_enabled is not None and target.reset_zoom_enabled != observed.reset_zoom_enabled:
                 return True
+            if target.command in {'zoom_in', 'zoom_out', 'reset_zoom'}:
+                if target.zoom is not None and observed.zoom is not None:
+                    return observed.zoom > target.zoom if target.command == 'zoom_in' else observed.zoom < target.zoom if target.command == 'zoom_out' else observed.zoom == 100
+                for old, _, size in target.samples:
+                    current_sample = next((sample for sample in observed.samples if self.text.equal(old, sample[0])), None)
+                    if current_sample and all(value > 0 for value in (*size, *current_sample[2])):
+                        ratios = [new / previous for new, previous in zip(current_sample[2], size)]
+                        if math.isclose(*ratios, rel_tol=0.05) and (min(ratios) > 1 if target.command == 'zoom_in' else max(ratios) < 1 if target.command == 'zoom_out' else False):
+                            return True
         application = self.text.ax.AXUIElementCreateApplication(target.pid)
         window, focus = self.text.read(application, 'AXFocusedWindow'), self.text.read(application, 'AXFocusedUIElement')
+        if target.command in {'select_tab', 'close_tab', 'zoom_in', 'zoom_out', 'reset_zoom'}:
+            return False
         return bool(window is not None and (not self.text.equal(window, target.window) or focus is not None and not self.text.equal(focus, target.focused))
                     or state.browser_url and state.browser_url != before.browser_url
                     or state.document_url and state.document_url != before.document_url)

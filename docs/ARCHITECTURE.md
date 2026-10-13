@@ -53,9 +53,9 @@ is rejected; quote those words to insert them literally.
 
 Interaction snapshots retain native window/focus/editor handles and baselines
 locally. A bounded 256-node/half-second scan collects enabled English menu
-commands and scroll areas, preferring the area containing focus. Text commands
+commands and scroll areas, preferring the area containing focus. Only requested English menu branches are scanned. Scroll/window-only goals start at the window, and webpage children are deferred behind browser controls. Window observation remains reserved before the node budget is exhausted. Text commands
 require a verifiable focused editor, copy/cut require selection, and select-all
-requires text. Browser commands require a known browser and an observed menu.
+requires text. Browser commands require a known browser and an observed menu, but not a focused editor. Missing AXFocusedUIElement suppresses text/Tab/Escape commands only; menus, grounded scrolling and native window controls remain eligible. Safari named-tab selection uses observed AX tab buttons. Browser/menu/scroll commands bind window/page/tab identity without binding an unrelated editor or caret; text commands retain exact editor/focus checks.
 Menu shortcuts invoke AXPress; select-all uses a writable native UTF-16 selection
 range or enabled Select All menu, avoiding keyboard-layout assumptions.
 Enter/Tab/Shift-Tab/Escape use paired PID-directed Quartz events. Enter never executes in Terminal/iTerm. Keyboard
@@ -66,17 +66,14 @@ Directional scrolling uses one pixel-unit wheel event positioned within an
 observed area with readable remaining range. Top/bottom use writable AX scrollbar
 positions. Range, bounds, native scrollbar/window/focus and editor context are
 freshly validated. Verification requires movement in the requested direction
-or exact boundary position; no event replay. Clipboard contents are never read;
-copy/cut use changeCount plus unchanged/exactly cut editor evidence. TextEdit/Notes
+or exact boundary position; no event replay. Safari standard WebKit AXScrollBar values use the documented normalized 0–1 range when both min/max attributes are unsupported. Unique axis-labelled child scrollbars are accepted. Paste reads bounded plain text only locally, checking stable changeCount before/after capture and before dispatch; neither clipboard contents nor native handles enter Jev state or reports. Copy/cut use changeCount plus unchanged/exactly cut editor evidence. TextEdit/Notes
 Enter verifies exact newline/caret; selection verifies the complete UTF-16 range.
-Paste/undo/redo require changed editor values; other menu/navigation/focus actions
-need a native focus/window/document/browser URL change, changed tab selection/identity, reload busy/page identity, or observable reset-zoom availability. Unobservable effects stay
+Paste verifies exact expected insertion and UTF-16 caret; undo/redo require changed editor values. Safari tab selection and closure require same-window native selection/count evidence or confirmed removal of the original window from AXWindows; lost Accessibility permission/window evidence cannot prove closure, while zoom uses observed percentages, same-element proportional geometry or reset availability. A successful selection can withdraw its action target, so verification uses another observation of the same native window. Other menu/navigation/focus actions need a native focus/window/document/browser URL change, changed tab selection/identity, or reload busy/page identity. Unobservable effects stay
 unverified even if the event was sent.
 
 --auto-approve-basic changes only confidence prompts for app activation, HTTP
 navigation and supported searches. It cannot bypass blocks, fresh identity checks
-or verification. Cut/paste/close-tab and generic editor Enter always confirm,
-including with --yes. Continuous voice checkpoints after each run and survives
+or verification. Cut/close-tab and generic editor Enter always confirm, including with --yes; paste uses the normal confidence threshold. Terminal Y/N approval restores the exact original NSRunningApplication process with a bounded foreground wait, then runtime repeats all window/editor/text/selection checks; approval never transfers to another target. Continuous voice checkpoints after each run and survives
 per-goal failures; queued follow-ups behind a failure are discarded. New utterances
 resume with fresh context. Spoken stop and Control-C cancel before the next effect;
 capture errors, overload and failed committed prefixes still stop the session.
@@ -238,9 +235,7 @@ Each dispatched step records bounded post-action reason/readiness, not values,
 carets or handles. Poll within three seconds, advance immediately on evidence and
 check cancellation each observation. All workflows use the same run_goal loop.
 
-SEARCH writes only an identified writable Finder query, capped at 4096 characters;
-it never rewrites a document. PREPARE_SEARCH exposes that field through Find.
-Query equality verifies query entry, not result readiness or opening. SELECT_ITEM
+SEARCH focuses only an identified writable Finder query, capped at 4096 characters, sets its exact value and sends paired PID-directed Return after rechecking foreground/window/query; it never rewrites a document or submits Terminal input. Finder prioritizes File → Find before dense window content, accepts supported search text/combobox fields when AXEnabled is unsupported and AXValue is writable, and rejects explicit disabled/error states. PREPARE_SEARCH exposes that field through Find. Query equality verifies query entry plus submission dispatch, not result readiness or opening. SELECT_ITEM
 requires a visible selectable item with a resolvable local URL. Deduplicate AX
 representations of one URL; disable distinct same-name files. OPEN_ITEM requires
 exactly one native collection selection and the current Open menu. File device/inode/size/mtime and
@@ -265,8 +260,7 @@ Secure/password roles and
 protected ancestors are rejected before reading values. Disabled and read-only
 fields are excluded. Native CFEqual identity maps adjacent snapshots; fresh handles
 alone execute. Available AXWindow identity must match the observed focused window.
-Only the focused editor retains existing document value/selection locally; values
-above 65,536 Python characters or missing/invalid selections prevent insertion.
+Only the focused editor retains existing document value/selection locally. Prefer AXValue strings; bridge NSAttributedString through string(). If AXValue is unavailable, a successful integer AXNumberOfCharacters=0 proves an empty body. Nonempty fallback requires bounded AXStringForRange over the complete native range and matching UTF-16 length. Oversized/inconsistent/unreadable text and missing/invalid selections still prevent insertion. The insertion method itself is unchanged.
 
 Immediately before effects, compare app PID, window/element identity, role/label,
 write capabilities, focus, exact value and selection. Repeat after approval and
@@ -421,3 +415,19 @@ User confirmation (2026-10-04): Notes typing worked after the AXEnabled
 attribute-unsupported compatibility fix. This establishes a successful user-run
 Notes workflow. The formal native-harness result and TextEdit acceptance remain
 pending independent confirmation.
+
+## 2026-10-12 reported command repairs
+
+Plain named app requests bind one exact installed name/alias. Notes creation, TextEdit new-document creation and Finder search constrain executable operation/target heads to their app while preserving the full installed catalog locally. Explicit observed control-and-type commands stay in their foreground app. SemanticMenu carries the scope through target pruning and validates it independently; Jev still selects each effect. Plain opening of an already-active app can verify STOP with fresh foreground identity. App quitting and Terminal new-window creation have no executor and cannot substitute generic presses or activation. Existing text insertion and web navigation implementations are unchanged.
+
+The user confirmed web/search/typing/copy, standalone Notes creation, TextEdit create/type, Music play and spoken stop. Reported repair artifacts exercise production routing with synthetic native services; live Jev progression is separate from native acceptance. This tool host remains AX-untrusted. Music playlist selection and Helium/other-browser tab support are deferred.
+
+## Subsequent native discovery feedback
+
+The user's later logs show new-note creation verified by selection identity, followed by a focused writable body with unreadable value and no TYPE_TEXT choice; Finder had no query/Find target after focus, and Safari scrolling had no interaction targets. These logs establish missing capabilities, not successful repaired native behavior. New E2E scenarios replay nil/attributed/range text, known menu/application-root optional AXSubrole failures and absent Safari focus. Only those structural roles permit generic subrole failure; secure/protected/parent/role errors and text subrole failures retain strict rejection. Protected checks precede all text reads.
+
+When a verified created note's focused body lacks readable text/caret, runtime observes it for up to three seconds before another Jev call. Keep its app/window/editor/selection identity pinned and stop on drift, cancellation or timeout; do not repeat creation. An unfocused body still follows the separate FOCUS_FIELD step. Readiness waiting cannot change or normalize the dictated payload.
+
+The user's maximize preference is full screen. Minimize/fullscreen use readable writable AXMinimized/AXFullScreen on one observed window and verify that original window's resulting state through AXWindows. Named commands may focus a running exact app before the window effect; they cannot target another app's window or launch an unrequested app. Native window attributes are permitted in Terminal/iTerm while keyboard/menu input and submission remain blocked. Ordered explicit window tails follow one verified insertion; quoted command words remain literal.
+
+Reports add bounded value error/type/source, ancestry failure roles, workflow/query discovery and interaction/window capability checks. Document/clipboard text and native handles remain local. Pasteboard text is captured only for explicitly requested paste. Tests write native-*-e2e.json and opt-in live-native-discovery-e2e.json with synthetic native services; tool-host AX trust remains false, so actual application acceptance remains unverified.

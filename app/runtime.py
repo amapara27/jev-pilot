@@ -5,7 +5,7 @@ from __future__ import annotations
 from threading import Event
 import re
 import sys
-from time import perf_counter
+from time import perf_counter, monotonic, sleep
 from typing import Callable
 
 from .decision import JevCallError, select_action
@@ -101,26 +101,43 @@ def run_goal(
                     raise TextInputError('The inserted text, caret or focus changed before explicit Enter; no submission was sent.')
             if index == 0 and intended_bundle and (before.active is None or before.active.bundle_id != intended_bundle):
                 raise DesktopError("The queued instruction's intended app changed; no effect was sent.")
+            if created_note is not None and 'TYPE_TEXT' in required - verified_operations:
+                deadline = monotonic() + 3
+                while True:
+                    if cancellation_requested():
+                        return report
+                    if not same_created_note(desktop, created_note, before):
+                        raise DesktopError('The newly created note changed while waiting for its body; no text was sent.')
+                    body = note_body(before)
+                    if not body.focused or body.can_type:
+                        break
+                    if monotonic() >= deadline:
+                        report.update(outcome='incomplete', editor_readiness=editor_readiness(before),
+                                      reason='The note was created, but its body did not expose readable text and a valid caret within three seconds; creation was not repeated.')
+                        return report
+                    cancel_event.wait(0.05) if cancel_event is not None else sleep(0.05)
+                    before = desktop.snapshot()
+                timing('editor_readiness')
             menu = desktop.semantic_menu(goal, before)
-            menu = SemanticMenu(goal, {key: facts for key, facts in menu.targets.items() if key not in pressed_controls}, menu.payloads)
+            menu = SemanticMenu(goal, {key: facts for key, facts in menu.targets.items() if key not in pressed_controls}, menu.payloads, menu.intent)
             if prepared_field is not None:
                 current = next((item for item in before.text_fields if item.id == prepared_field.id), None)
                 if not current or not desktop.text.same_target(prepared_field, current, typing=False):
                     raise DesktopError("The workflow's prepared editor or window changed; no further effect was sent.")
                 if "TYPE_TEXT" in required - verified_operations:
                     menu = SemanticMenu(goal, {key: facts for key, facts in menu.targets.items()
-                                              if key in {"none", current.id}}, menu.payloads)
+                                              if key in {"none", current.id}}, menu.payloads, menu.intent)
             if created_note is not None and "TYPE_TEXT" in required - verified_operations:
                 if not same_created_note(desktop, created_note, before):
                     raise DesktopError("The newly created note or its editor changed; no further effect was sent.")
                 body = note_body(before)
                 menu = SemanticMenu(goal, {key: facts for key, facts in menu.targets.items()
-                                          if key in {"none", body.id}}, menu.payloads)
+                                          if key in {"none", body.id}}, menu.payloads, menu.intent)
             if ordered:
                 next_command = ordered[command_index] if command_index < len(ordered) else None
                 menu = SemanticMenu(goal, {key: facts for key, facts in menu.targets.items()
                                           if facts.get('scope') != 'interaction' or facts.get('command') == next_command
-                                          and (next_command != 'enter' or inserted_field is None or facts.get('field_id') == inserted_field.id)}, menu.payloads)
+                                          and (next_command != 'enter' or inserted_field is None or facts.get('field_id') == inserted_field.id)}, menu.payloads, menu.intent)
             report["observed_app"] = before.active.name if before.active else None
             report["accessibility_trusted"] = before.ax_trusted
             report["editor_readiness"] = editor_readiness(before)
@@ -171,6 +188,13 @@ def run_goal(
             if pending_payload_id is not None and payload_id not in {"none", pending_payload_id}:
                 raise SemanticError("Jev changed the prepared typing payload; no further effect was sent.")
             if decision.semantic["operation"] == "STOP":
+                if menu.intent.get('mode') == 'app' and before.active and before.active.bundle_id == menu.intent['bundle']:
+                    current = desktop.snapshot()
+                    if current.active != before.active:
+                        raise DesktopError('The requested already-active app changed during the decision.')
+                    step.update(verified=True, outcome='already_active')
+                    report.update(outcome='completed', verified=True, completion_scope='already_active')
+                    return report
                 if stream_app and before.active and before.active.bundle_id == stream_app:
                     current = desktop.snapshot()
                     if current.active != before.active:

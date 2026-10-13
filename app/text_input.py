@@ -9,6 +9,7 @@ import unicodedata
 from time import monotonic
 
 import ApplicationServices as AX
+from AppKit import NSAttributedString
 from CoreFoundation import CFEqual
 import Quartz
 
@@ -18,6 +19,7 @@ MAX_NODES = 256
 MAX_FIELDS = 32
 TEXT_ROLES = {"AXTextField", "AXTextArea", "AXComboBox"}
 COLLECTION_ROLES = {"AXTable", "AXOutline", "AXList", "AXBrowser", "AXCollection"}
+MENU_ROLES = {"AXMenuBar", "AXMenuBarItem", "AXMenu", "AXMenuItem"}
 
 
 def native_true(value: object) -> bool:
@@ -152,8 +154,11 @@ class NativeText:
             role_error, raw_role = self.ax.AXUIElementCopyAttributeValue(current, "AXRole", None)
             subrole_error, raw_subrole = self.ax.AXUIElementCopyAttributeValue(current, "AXSubrole", None)
             absent = {AX.kAXErrorAttributeUnsupported, AX.kAXErrorNoValue}
-            if role_error != 0 or subrole_error not in absent | {0}:
+            # AppKit menus and application roots have no meaningful subrole.
+            optional_subrole = role_error == 0 and raw_role in MENU_ROLES | {'AXApplication'} and subrole_error == AX.kAXErrorFailure
+            if role_error != 0 or subrole_error not in absent | {0} and not optional_subrole:
                 self.count_reason("ancestry_rejections", f"role_error_{role_error}_subrole_error_{subrole_error}")
+                self.count_reason('ancestry_failure_roles', str(raw_role or 'unavailable')[:64])
                 return False
             role = str(raw_role or "").casefold()
             subrole = str(raw_subrole or "").casefold()
@@ -175,6 +180,37 @@ class NativeText:
                 return True
             current = parent
         return False
+
+    def text_value(self, element, check):
+        """Read bounded native text, proving nil empty bodies by character count."""
+
+        error, value = self.ax.AXUIElementCopyAttributeValue(element, 'AXValue', None)
+        check.update(value_ax_error=int(error), value_type=type(value).__name__[:64], value_source='unavailable')
+        if error == 0 and isinstance(value, NSAttributedString):
+            value = value.string()
+            check['value_source'] = 'attributed_value'
+        if error == 0 and isinstance(value, str):
+            if len(value) <= MAX_VALUE_CHARACTERS:
+                check['value_source'] = 'value' if check['value_source'] == 'unavailable' else check['value_source']
+                return value
+            return None
+        count_error, count = self.ax.AXUIElementCopyAttributeValue(element, 'AXNumberOfCharacters', None)
+        check['character_count_ax_error'] = int(count_error)
+        check['character_count_type'] = type(count).__name__[:64]
+        if count_error or not isinstance(count, int) or isinstance(count, bool) or not 0 <= count <= MAX_VALUE_CHARACTERS * 2:
+            return None
+        if count == 0:
+            check['value_source'] = 'empty_character_count'
+            return ''
+        parameter = self.ax.AXValueCreate(self.ax.kAXValueCFRangeType, (0, count))
+        if parameter is None:
+            return None
+        range_error, value = self.ax.AXUIElementCopyParameterizedAttributeValue(element, 'AXStringForRange', parameter, None)
+        check['string_range_ax_error'] = int(range_error)
+        if range_error == 0 and isinstance(value, str) and len(value) <= MAX_VALUE_CHARACTERS and utf16_length(value) == count:
+            check['value_source'] = 'string_for_range'
+            return value
+        return None
 
     def inspect(self, element: object, pid: int, bundle_id: str, window: object, focused: object) -> TextField | None:
         """Retain focused text only after native availability and write checks."""
@@ -214,9 +250,7 @@ class NativeText:
         check["availability_check"] = "write_support" if enabled_unsupported else "enabled_attribute"
         value, selection = None, None
         if is_focused:
-            observed = self.read(element, "AXValue")
-            if isinstance(observed, str) and len(observed) <= MAX_VALUE_CHARACTERS:
-                value = observed
+            value = self.text_value(element, check)
             raw_range = self.read(element, "AXSelectedTextRange")
             if raw_range is not None:
                 try:

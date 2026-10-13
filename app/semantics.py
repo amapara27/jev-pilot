@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 
 from .models import ActionCandidate, JSONValue
@@ -20,7 +20,7 @@ OPERATIONS = {
     "FOCUS_APP_FOR_WORKFLOW": "Focus a running background app before a multi-step workflow. Carry the future text/query span (or none); do not insert yet.",
     "FOCUS_FIELD": "Typing prerequisite: focus an observed focusable editable field that is not focused. Carry the intended span (or none); do not insert yet.",
     "TYPE_TEXT": "Insert an exact text span into a focused field with can_type=true, without submission. App-level targets cannot execute insertion.",
-    "KEYBOARD_ACTION": "Perform an explicit supplied command in its observed editor/menu/focus context. No payload. Follow next_command; Enter is separate from typing and unavailable in Terminal.",
+    "KEYBOARD_ACTION": "Perform an explicit supplied command in its observed editor/menu/window context. No payload. Follow next_command; maximize means enter full screen, minimize means minimize that window. Enter is separate from typing and unavailable in Terminal.",
     "SCROLL": "Send one wheel event to an observed scrollable area with remaining range. No payload. Follow next_command; never scroll without a grounded scroll target.",
     "OPEN_WEBSITE": "Open an exact named-site/domain/HTTP URL span in an installed browser. Choose the default_browser unless a browser is explicitly requested. Never insert into an editor.",
     "SEARCH_WEB": "Search a supplied website_search target (Google or YouTube) with an exact query span. Choose the default browser unless explicitly requested. Never use Finder search or type into an editor.",
@@ -55,6 +55,7 @@ class SemanticMenu:
     goal: str
     targets: dict[str, dict[str, JSONValue]]
     payloads: dict[str, dict[str, JSONValue]]
+    intent: dict = field(default_factory=dict)
 
     def resolve(
         self, operation: str, target_id: str, payload_id: str
@@ -62,6 +63,12 @@ class SemanticMenu:
         """Check compatibility before materializing one grounded native effect."""
 
         target, payload = self.targets[target_id], self.payloads[payload_id]
+        if self.intent:
+            if operation not in self.intent['operations']:
+                raise SemanticError('This operation is outside the requested app/workflow scope.')
+            bundle = target_id if target.get('scope') == 'application' else target.get('bundle_identifier')
+            if target_id != 'none' and bundle != self.intent['bundle']:
+                raise SemanticError('The selected app does not match the explicit command/workflow.')
         if operation in {"STOP", "UNSUPPORTED"}:
             valid = target_id == payload_id == "none"
         elif operation in {"OPEN_APP", "FOCUS_APP", "OPEN_APP_FOR_TEXT", "FOCUS_APP_FOR_TEXT", "OPEN_APP_FOR_WORKFLOW", "FOCUS_APP_FOR_WORKFLOW"}:
@@ -242,7 +249,7 @@ def extract_payloads(goal: str) -> dict[str, dict[str, JSONValue]]:
         # Keep the full suffix AND alternatives: Jev decides whether trailing words
         # are literal text, an app context, a prerequisite, or another command.
         for boundary in re.finditer(
-            r"\s+(?:(?:in|using|with)\s+(?:a\s+new\s+note|[\w ]+)|and\s+(?:then\s+)?(?:open|switch|type|write|search|run|press|hit|select|scroll|copy|cut|paste|undo|redo)\b)",
+            r"\s+(?:(?:in|using|with)\s+(?:a\s+new\s+note|[\w ]+)|and\s+(?:then\s+)?(?:open|switch|type|write|search|run|press|hit|select|scroll|copy|cut|paste|undo|redo|minimi[zs]e|maximi[zs]e|enter\s+full\s*screen)\b)",
             goal[start:],
             re.IGNORECASE,
         ):

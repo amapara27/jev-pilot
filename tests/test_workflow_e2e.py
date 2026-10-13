@@ -62,7 +62,15 @@ def setup(bundle, url=None):
     ax = WorkflowAX(bundle, url)
     workspace = Workspace(ax)
     workspace.URLForApplicationWithBundleIdentifier_ = lambda identifier: object() if identifier in {bundle, "com.apple.TextEdit", "com.apple.Safari"} else None
-    desktop = MacDesktop(workspace=workspace, text=NativeText(ax=ax, quartz=NativeQuartz(ax), equal=lambda a, b: a is b))
+    quartz = NativeQuartz(ax)
+    post = quartz.CGEventPostToPid
+    def event(pid, value):
+        if value['code'] == 36:
+            quartz.events.append(value)
+        else:
+            post(pid, value)
+    quartz.CGEventPostToPid = event
+    desktop = MacDesktop(workspace=workspace, text=NativeText(ax=ax, quartz=quartz, equal=lambda a, b: a is b))
     return desktop, ax
 
 
@@ -289,7 +297,8 @@ class WorkflowEndToEnd(unittest.TestCase):
                 client = ControlJev(plan=[("STOP", "none", "none"), ("FOCUS_FIELD", "editor", "span_0"), ("TYPE_TEXT", "editor", "span_0")])
                 self_test = self
                 with patch("app.runtime.verify_action", side_effect=lambda *args, **kwargs: verify_action(*args, timeout_seconds=0.1, **kwargs)):
-                    report = run_goal('create a new document and type "hello"', desktop, client=client)
+                    goal = 'create a new document and type "hello"' if bundle == 'com.apple.TextEdit' else 'press New Document and type "hello"'
+                    report = run_goal(goal, desktop, client=client)
                 if mode == "new_document":
                     self.assertEqual(report["outcome"], "completed", report)
                     self.assertEqual(ax.editor.attrs["AXValue"], "hello")
@@ -510,7 +519,8 @@ class WorkflowEndToEnd(unittest.TestCase):
             self.assertEqual(report["outcome"], "completed", report.get("reason"))
             self.assertEqual(ax.editor.attrs["AXValue"], "resume")
             self.assertTrue(ax.item.attrs["AXSelected"])
-            self.assertEqual([effect[0] for effect in ax.effects], ["AXValue", "AXSelected", "press"])
+            self.assertEqual([effect[0] for effect in ax.effects], ["AXFocused", "AXValue", "AXSelected", "press"])
+            self.assertEqual([(event['code'], event['down']) for event in desktop.text.quartz.events], [(36, True), (36, False)])
             cases["finder_search_select_open"] = report
 
             desktop, ax = setup("com.apple.finder", file.as_uri())

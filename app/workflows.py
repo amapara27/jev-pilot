@@ -64,6 +64,7 @@ class NativeWorkflows:
         self.text = text
         self.previous = ()
         self.next_id = 0
+        self.diagnostics = {}
 
     def sole_selection(self, node):
         """Require one native collection selection; opening must never affect other files."""
@@ -84,7 +85,9 @@ class NativeWorkflows:
         """Discover exact English menu actions, search fields and visible URL-backed items."""
 
         text, ax = self.text, self.text.ax
-        queue = deque([window, text.read(application, "AXMenuBar")])
+        menu_error, menu = ax.AXUIElementCopyAttributeValue(application, 'AXMenuBar', None)
+        self.diagnostics = {'menu_bar_ax_error': int(menu_error), 'query_field_checks': []}
+        queue = deque([menu, window] if bundle == FINDER else [window, menu])
         deferred = deque()
         visited, found, selected_notes = [], [], []
         deadline = monotonic() + 1
@@ -100,6 +103,8 @@ class NativeWorkflows:
                 continue
             role = text.read(node, "AXRole")
             label = next((str(value) for value in (text.read(node, "AXTitle"), text.read(node, "AXDescription")) if isinstance(value, str) and value), "")[:240]
+            if bundle == FINDER and role == 'AXMenuBarItem' and label.casefold() != 'file':
+                continue
             enabled_error, enabled = ax.AXUIElementCopyAttributeValue(node, "AXEnabled", None)
             error, actions = ax.AXUIElementCopyActionNames(node, None)
             press = error == 0 and "AXPress" in (actions or ())
@@ -120,9 +125,12 @@ class NativeWorkflows:
                     kind = "find"
                 elif bundle == FINDER and label.casefold() == "open":
                     kind = "open"
-            if bundle == FINDER and role == "AXTextField" and native_true(enabled):
-                search = text.read(node, "AXSubrole") == "AXSearchField" or label.casefold() in {"search", "search text", "search field"}
-                raw_value = text.read(node, "AXValue") if search else None
+            if bundle == FINDER and role in {"AXTextField", "AXComboBox", "AXSearchField"} and (enabled_error == -25205 or enabled_error == 0 and native_true(enabled)):
+                search = role == 'AXSearchField' or text.read(node, "AXSubrole") == "AXSearchField" or label.casefold() in {"search", "search text", "search field"}
+                check = {'role': role, 'enabled_ax_error': int(enabled_error)}
+                raw_value = text.text_value(node, check) if search else None
+                if search and len(self.diagnostics['query_field_checks']) < 32:
+                    self.diagnostics['query_field_checks'].append(check)
                 if search and text.settable(node, "AXValue") and isinstance(raw_value, str) and len(raw_value) <= 4096:
                     kind, value = "query", raw_value
             if bundle == FINDER and role in {"AXRow", "AXCell", "AXButton", "AXImage"}:
@@ -160,6 +168,9 @@ class NativeWorkflows:
         counts = Counter(item.label.casefold() for item in found if item.kind == "item")
         found = [replace(item, ambiguous=counts[item.label.casefold()] > 1) if item.kind == "item" else item for item in found]
         self.previous = tuple(found)
+        self.diagnostics.update(visited_nodes=len(visited), scan_limit_reached=bool(queue or deferred),
+                                control_count=sum(item.kind in {'control', 'find', 'open', 'new_note'} for item in found),
+                                query_count=sum(item.kind == 'query' for item in found))
         return self.previous
 
     def same_target(self, original, current):
@@ -168,13 +179,33 @@ class NativeWorkflows:
         return (original == current and self.text.equal(original.element, current.element)
                 and self.text.equal(original.window, current.window))
 
-    def execute(self, action, state):
+    def execute(self, action, state, guard):
         """Send one prevalidated AX operation; uncertain effects never get a fallback."""
 
         target = next(item for item in state.workflow_targets if item.id == action.parameters["element_id"])
         ax = self.text.ax
+        if not guard():
+            raise TextInputError('The foreground app changed before the workflow; no effect was sent.')
         if action.kind == "SEARCH":
+            q = self.text.quartz
+            if not q.CGPreflightPostEventAccess() or not self.text.settable(target.element, 'AXFocused'):
+                raise TextInputError('Finder search cannot receive focus or Return; no query was entered.')
+            events = [q.CGEventCreateKeyboardEvent(None, 36, down) for down in (True, False)]
+            if any(event is None for event in events):
+                raise TextInputError('macOS could not create Finder search Return events.')
+            error = ax.AXUIElementSetAttributeValue(target.element, 'AXFocused', True)
+            if error:
+                raise TextInputError('Finder search could not receive focus.', effect_sent=True)
             error = ax.AXUIElementSetAttributeValue(target.element, "AXValue", action.parameters["text"])
+            application = ax.AXUIElementCreateApplication(target.pid)
+            if error or not guard() or not self.text.equal(self.text.read(application, 'AXFocusedWindow'), target.window) or not self.text.equal(self.text.read(application, 'AXFocusedUIElement'), target.element) or self.text.read(target.element, 'AXValue') != action.parameters['text']:
+                raise TextInputError('Finder search changed before submission; Return was not sent.', effect_sent=True)
+            for event in events:
+                q.CGEventSetFlags(event, 0)
+            try:
+                q.CGEventPostToPid(target.pid, events[0])
+            finally:
+                q.CGEventPostToPid(target.pid, events[1])
         elif action.kind == "SELECT_ITEM":
             error = ax.AXUIElementSetAttributeValue(target.element, "AXSelected", True)
         else:

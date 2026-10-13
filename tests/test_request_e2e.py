@@ -114,7 +114,8 @@ class RequestEndToEnd(unittest.TestCase):
         ):
             with tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "report.json"
-                main(["Open notes.", "--report", str(path)], desktop=desktop, client=client, output=io.StringIO())
+                goal = 'Bring up a useful app' if name == 'choice_limit' else 'Open notes.'
+                main([goal, "--report", str(path)], desktop=desktop, client=client, output=io.StringIO())
                 report = json.loads(path.read_text())
             cases[name] = {"request_bytes": client.request_bytes, "provider_calls": client.calls, "report": report}
             self.assertEqual(report["outcome"], expected, report.get("reason"))

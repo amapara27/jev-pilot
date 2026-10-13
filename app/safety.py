@@ -8,6 +8,7 @@ from urllib.parse import unquote, urlparse
 
 from .models import ActionCandidate
 from .web_navigation import WEB_OPERATIONS, normalize_web_url
+from .interactions import WINDOW_COMMANDS
 
 
 def blocked_goal(goal: str) -> bool:
@@ -28,7 +29,7 @@ def disposition(action: ActionCandidate, confidence: float, *, auto_approve_basi
     if action.kind == "STOP":
         return "deny"
     if action.kind in {'KEYBOARD_ACTION', 'SCROLL'}:
-        if action.parameters.get('bundle_identifier') in {'com.apple.Terminal', 'com.googlecode.iterm2'} and action.kind == 'KEYBOARD_ACTION':
+        if action.parameters.get('bundle_identifier') in {'com.apple.Terminal', 'com.googlecode.iterm2'} and action.kind == 'KEYBOARD_ACTION' and action.parameters.get('command') not in WINDOW_COMMANDS:
             return 'deny'
         return 'confirm' if action.parameters.get('requires_confirmation') or confidence < 0.82 else 'allow'
     if action.kind in WEB_OPERATIONS:

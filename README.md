@@ -23,7 +23,9 @@ These commands also work through `--listen`. A browser action verifies the reque
 
 App-switching commands perform one activation. Typing commands allow up to four Jev-selected steps to activate the app, focus the intended editor, and insert text exactly once. Text replaces the current selection or inserts at the caret, preserving Unicode and whitespace. Multiline text requires an editor with writable Accessibility selected text. Keyboard fallback rejects control characters, and Terminal typing never submits a command.
 
-Explicit Enter is a separate action after exact insertion verifies. Notes and TextEdit text areas verify the resulting newline and caret; other focused editors require confirmation and an observable change. Terminal/iTerm keyboard commands remain unavailable. The existing insertion implementation is unchanged.
+Plain named app commands now require one exact installed name/alias: “open Notes” can only target Apple Notes. Creation workflows bind Notes or TextEdit, and Finder searches bind Finder; other installed apps remain available for switching. An explicit observed control-and-type command stays in its current app. App quitting, Terminal new-window creation and Music playlist selection remain unsupported/deferred rather than substituting app activation or unrelated controls.
+
+Explicit Enter is a separate action after exact insertion verifies. Notes and TextEdit text areas verify the resulting newline and caret; other focused editors require confirmation and an observable change. Terminal/iTerm text/menu keyboard commands remain unavailable; their native window controls are separate. The existing insertion implementation is unchanged.
 
 ```sh
 python -m app 'type hello world and hit enter'
@@ -34,15 +36,26 @@ python -m app 'scroll down a lot'
 python -m app 'go to the top'
 ```
 
-Text shortcuts require a focused readable editable field; select-all needs nonempty text, and copy/cut need a selection. Copy, cut, paste, undo, redo and find invoke an enabled observed menu command in the current app. Browser menus additionally support new/close/reopen/next/previous tab, back/forward/reload, address-bar focus and zoom in/out/reset. Tab, Shift-Tab and Escape require safe accessible focus. Cut, paste, closing tabs and Enter outside Notes/TextEdit always need interactive approval, including with `--yes`. Unsupported/disabled/missing menus are unavailable. Clipboard contents stay local and are never read into provider state or reports; copy/cut observe the pasteboard change counter.
+Text shortcuts require a focused readable editable field; select-all needs nonempty text, and copy/cut need a selection. Copy, cut, paste, undo, redo and find invoke an enabled observed menu command in the current app. Paste can first focus the existing body; it checks bounded plain text locally and verifies exact insertion/caret without exposing clipboard contents to Jev or reports. Browser menus additionally support new/close/reopen/next/previous tab, back/forward/reload, address-bar focus and zoom in/out/reset. Safari also supports choosing an observed tab by name. Tab, Shift-Tab and Escape require safe accessible focus. Cut, closing tabs and Enter outside Notes/TextEdit always need interactive approval, including with `--yes`; paste follows the normal confidence threshold. Unsupported/disabled/missing menus are unavailable.
 
-Scrolling requires an accessible scroll area with a readable range and remaining room in the requested direction. It prefers the area containing current focus. Up/down/left/right use one positioned wheel event with normal, “a little,” or “a lot” distance. Top/bottom additionally require a writable native scrollbar position. Native range/focus/window identity is rechecked before dispatch, and position movement must be observed. Missing evidence or an uncertain command is never retried. Browser/menu effects require observed focus/window/URL changes; event delivery alone is insufficient, so some native apps may report `unverified` even when they acted.
+Scrolling requires an accessible scroll area with a readable range and remaining room in the requested direction. It prefers the area containing current focus. Up/down/left/right use one positioned wheel event with normal, “a little,” or “a lot” distance. Top/bottom additionally require a writable native scrollbar position. Safari's standard WebKit scrollbars support their normalized 0–1 range when min/max attributes are unsupported, including unique axis-labelled child bars. Native range/window identity is rechecked before dispatch, and position movement must be observed. Browser menus and scrolling ignore unrelated editor/caret drift while preserving window/page/tab guards. Tab selection/closure and zoom require tab or zoom evidence; event delivery alone is insufficient, so some native apps may report `unverified` even when they acted.
+
+Menus, scrolling and window commands can run without an AXFocusedUIElement; text commands still require the exact focused editor. Discovery visits only the requested menu branches and defers webpage content behind browser controls. A generic failure reading optional AXSubrole on a known menu/application root does not discard that menu; secure roles, protected content and other ancestry failures still block.
+
+“Maximize” enters full screen, as requested; “minimize” minimizes the observed window. Both require readable, writable native window attributes and verify the original window's resulting state. Named commands such as “maximize Safari” can first focus that running app, and never operate on another app's window. Window controls also work in Terminal without sending keyboard input or submitting commands.
+
+```sh
+python -m app 'maximize this window'
+python -m app 'minimize Safari'
+```
 
 The CLI continuously transcribes microphone input locally with MLX-Audio's 8-bit Nemotron streaming ASR. Final utterances enter a five-command FIFO and one worker runs the same observe → Jev → guarded effect → verify loop as typed goals. Notes creation, Finder search/selection/opening, and pressing observed Accessibility buttons/menus in other apps use this shared loop. Native compatibility still needs manual acceptance. Terminal submission and coordinate/canvas clicking remain unsupported. Secure, disabled, read-only, oversized, or unverifiable targets are unavailable.
 
 The semantic vocabulary includes app activation, website navigation/web search, field focus, typing, Finder search, Notes creation, generic control presses, unsupported Terminal submission, STOP, and UNSUPPORTED. Jev sees the full vocabulary as context but chooses only currently available operations. One request asks speculative targets per operation, then consumes only the chosen head. Completed prerequisites/controls are withdrawn; typing waits for required creation. Payloads are exact locally extracted spans. Quotes protect literal command words. Goals over 8192 characters or 16 proposed spans fail locally.
 
 Low-confidence choices require confirmation in an interactive terminal. Goals mentioning passwords, payments, purchases, or deletion are blocked before a request is sent to Jev. App switching uses macOS AppKit and does not require Accessibility permission.
+
+After Y/N approval, the CLI restores the exact original process if answering required switching to Terminal, then repeats all target/window/text checks. Changed editors or selections still stop the command.
 
 ## Set up
 
@@ -99,6 +112,8 @@ python -m app 'type "hello 🦊" in TextEdit'
 
 Quoted payloads preserve exact text. Jev chooses a real editable field; typing requires a readable value and UTF-16 caret/selection. The CLI checks that both are unchanged and verifies the complete resulting text/caret. Failed or uncertain insertion is never repeated. A dry run stops before the first effect; it does not simulate subsequent preparation steps.
 
+The baseline reader accepts native attributed strings as text. If AXValue is unavailable, a successful zero character count proves an empty body; nonempty text requires a bounded AXStringForRange read whose UTF-16 length matches the native count. Missing or inconsistent evidence keeps typing unavailable. Reports include value error/type/source, query/menu discovery counts and focused-element availability, without document or clipboard contents.
+
 ## Try Notes and Finder workflows
 
 With Accessibility enabled, use an unlocked Notes folder and disposable files:
@@ -115,6 +130,10 @@ python -m app 'search Finder for "Jev disposable resume" and open it'
 ```
 
 Jev chooses each prerequisite against fresh state and compact action history. Notes can prove creation through changed selected-note identity before its body is focused, then focus and type separately. It keeps that note/editor pinned and refuses insertion into a nonempty or changed note. Indistinguishable creation pauses instead of making another note. Finder keeps exact query, URL, file and destination checks; duplicate names and missing evidence pause.
+
+After verified creation, a focused new body can wait up to three seconds for readable text and a valid caret before the next Jev call. Note/editor/window drift and cancellation stop that wait; an unreadable body produces an explicit incomplete result without repeating creation. An unfocused body still uses its separate focus step.
+
+Finder prioritizes the File → Find menu before dense window content. Search fields may omit AXEnabled only when AXValue is writable. Search focuses that query, sets its exact text and sends paired Return after checking the foreground/window/query again. Verification establishes query entry and submission dispatch, not result readiness or file opening.
 
 Other foreground accessible apps expose real AXPress buttons/menus through `PRESS_CONTROL`. A control press needs an observed selection/expansion, editor, or local-document change; it is never blindly assumed successful. A prepared editor is pinned through typing. Routine controls need 82% confidence; unknown controls need interactive approval, destructive labels and Terminal controls are blocked. URL/file controls cannot bypass Finder identity checks. Generic control-only completion has `verified_actions` scope, not proof of arbitrary goal completion. These are grounded accessible controls, not universal desktop automation.
 
@@ -225,6 +244,10 @@ before EOU with no prefix replay. `python -m compileall -q app scripts tests`
 checks the Python source; the retired Swift build is not part of this CLI.
 
 `.build/interactions-e2e.json`, `.build/keyboard-menu-e2e.json`, `.build/interaction-failures-e2e.json` and `.build/continuous-voice-e2e.json` cover explicit Enter, ordered shortcuts, clipboard approval, focus/text drift, missing scroll ranges, secure fields, event permissions and multiple speech commands with failure recovery. These use synthetic native/audio/provider services. `JEV_LIVE_JEV=1 python -m unittest discover -s tests -p 'test_interactions_e2e.py' -k test_live_input_progression -v` checks real Jev progression with scripted approval and synthetic desktop effects, writing `.build/live-interactions-e2e.json`; it does not prove actual app compatibility.
+
+`tests/test_reported_regressions_e2e.py` writes `.build/reported-*-e2e.json` for the reported Notes routing, paste, Safari tabs/zoom/focus, scrolling, Finder and approval failures. Its opt-in live case writes `.build/live-reported-regressions-e2e.json` with real Jev and synthetic native services. The user confirmed ordinary typing/web/search/copy, standalone Notes creation, TextEdit document creation, Music play and spoken stop on 2026-10-12; the new repairs still need native retesting. This tool host reports Accessibility trust false.
+
+`tests/test_native_discovery_e2e.py` reproduces the subsequent logs: unreadable new-note bodies, missing Safari focus and menu ancestry failures. Artifacts `.build/native-*-e2e.json` also cover paste/cut, Finder, native fullscreen/minimize, stale windows, protected content and failed/ignored setters. The opt-in `.build/live-native-discovery-e2e.json` proves real Jev progression with synthetic native services. These artifacts do not establish actual app compatibility.
 
 `.build/workflow-progression-e2e.json`, `.build/workflow-recovery-e2e.json` and
 `.build/generic-workflow-e2e.json` cover separate creation/focus/typing, delayed

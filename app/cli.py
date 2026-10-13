@@ -11,8 +11,11 @@ import tempfile
 from pathlib import Path
 from threading import Event, Thread
 from typing import TextIO
+from time import monotonic
 
 import ApplicationServices as AX
+from AppKit import NSApplicationActivateIgnoringOtherApps
+from Foundation import NSDate, NSRunLoop
 from .models import ActionCandidate
 
 from .desktop import MacDesktop
@@ -47,6 +50,29 @@ def _save_report(path: Path, report: dict[str, object]) -> None:
         json.dump(report, file, indent=2, sort_keys=True)
         file.write("\n")
     os.replace(temporary, path)
+
+
+def _confirm_action(desktop, prompt):
+    """Restore the exact process after terminal approval; runtime rechecks its target."""
+
+    original = desktop.workspace.frontmostApplication()
+    if not original:
+        return False
+    pid = int(original.processIdentifier())
+    if input(prompt).strip().casefold() != 'y':
+        return False
+    current = desktop.workspace.frontmostApplication()
+    if current and int(current.processIdentifier()) == pid:
+        return True
+    if not original.activateWithOptions_(NSApplicationActivateIgnoringOtherApps):
+        return False
+    deadline = monotonic() + 2
+    while monotonic() < deadline:
+        current = desktop.workspace.frontmostApplication()
+        if current and int(current.processIdentifier()) == pid:
+            return True
+        NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.05))
+    return False
 
 
 def _run_voice(
@@ -151,7 +177,7 @@ def _run_voice(
         approval_wait.set()
         print(f"Confirm spoken action: {action.description} [y/N] ", end="", file=output, flush=True)
         try:
-            return input().strip().casefold() == "y"
+            return _confirm_action(target_desktop, '')
         finally:
             approval_wait.clear()
 
@@ -289,6 +315,7 @@ def main(
     if not args.goal:
         _parser().error("a text goal is required unless --request-accessibility is used")
     goal = " ".join(args.goal)
+    target_desktop = desktop if desktop is not None else MacDesktop()
 
     def approve(action: ActionCandidate) -> bool:
         if args.yes and action.kind != "PRESS_CONTROL" and not action.parameters.get('requires_confirmation'):
@@ -298,12 +325,12 @@ def main(
         if action.kind == "TYPE_TEXT":
             # Show the exact locally resolved payload before low-confidence approval.
             print(f"Text: {action.parameters['text']!r}")
-        return input(f"Approve {action.description} [y/N] ").strip().casefold() == "y"
+        return _confirm_action(target_desktop, f"Approve {action.description} [y/N] ")
 
     try:
         report = run_goal(
             goal,
-            desktop if desktop is not None else MacDesktop(),
+            target_desktop,
             model=args.model,
             dry_run=args.dry_run,
             approve=approve,
