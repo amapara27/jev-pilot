@@ -24,7 +24,7 @@ jobs:
           version: "0.13.1"
           python-version: "3.12"
           enable-cache: false
-      - name: Install jevpilot and test tools
+      - name: Install jvpilot and test tools
         run: |
           uv venv --python 3.12
           uv pip install -e . pip 'setuptools>=77' packaging pyyaml

@@ -1,6 +1,6 @@
 # Jev Pilot architecture
 
-The active runtime is `jevpilot` (also `python -m app`): typed goals or continuous local Nemotron
+The active runtime is `jvpilot` (also `python -m app`): typed goals or continuous local Nemotron
 speech, one factorized Jev request per step, bounded typing preparation, native
 app/editor effects, and verified reports. Swift sources are retired references.
 
@@ -41,7 +41,7 @@ voice: microphone callback → bounded ordered PCM queue → Nemotron streaming 
 
 ## Packaging and installed paths
 
-`pyproject.toml` defines distribution `jevpilot` version `0.1.0` with Python >=3.12,
+`pyproject.toml` defines distribution `jvpilot` version `0.1.0` with Python >=3.12,
 the setuptools build backend and console entry point `app.cli:main`. Only the `app`
 package enters the wheel; dependencies come from `requirements.txt` through
 setuptools dynamic metadata. Conda development and `python -m app` remain supported.

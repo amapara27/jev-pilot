@@ -19,14 +19,14 @@ Clipboard editing, browser tabs/history/reload/zoom, scrolling, and Finder searc
 
 You need an Apple Silicon Mac, [uv](https://docs.astral.sh/uv/getting-started/installation/), and a TypeSafe account with a Jev API key. Internet access is needed for Jev decisions and the initial speech-model download. Speech transcription runs locally after the model is cached.
 
-After `jevpilot` is published to PyPI, install it with:
+After `jvpilot` is published to PyPI, install it with:
 
 ```sh
-uv tool install --python 3.12 jevpilot
+uv tool install --python 3.12 jvpilot
 uv tool update-shell
 ```
 
-Restart Terminal if needed for the `jevpilot` command to appear on your PATH. To install from a source checkout, see [Local development](#local-development).
+Restart Terminal if needed for the `jvpilot` command to appear on your PATH. To install from a source checkout, see [Local development](#local-development).
 
 The first listening run downloads the Nemotron speech model automatically if it is not already cached. This can take several minutes. Later runs reuse the cached model.
 
@@ -51,7 +51,7 @@ Allow **Microphone** access for the Terminal/Python host macOS identifies when y
 Desktop controls also need **Accessibility** access. Request it with:
 
 ```sh
-jevpilot --request-accessibility
+jvpilot --request-accessibility
 ```
 
 Enable the identified host under **System Settings → Privacy & Security → Accessibility**. Restart that host if needed, then rerun the command until it reports `accessibility_trusted: true`. Opening or switching apps alone does not require Accessibility; most other controls do.
@@ -61,15 +61,15 @@ Enable the identified host under **System Settings → Privacy & Security → Ac
 In Terminal, start a session with:
 
 ```sh
-jevpilot --listen --auto-approve-basic
+jvpilot --listen --auto-approve-basic
 ```
 
-This skips routine confidence prompts for app opening/switching, website navigation, and Google/YouTube searches. Other approvals and safety checks stay active. Run `jevpilot --listen` to keep those routine prompts too.
+This skips routine confidence prompts for app opening/switching, website navigation, and Google/YouTube searches. Other approvals and safety checks stay active. Run `jvpilot --listen` to keep those routine prompts too.
 
 To skip routine confidence prompts for other supported commands as well, use:
 
 ```sh
-jevpilot --listen --yes
+jvpilot --listen --yes
 ```
 
 These commands always require approval, even with `--yes`: cutting text, closing a browser tab, pressing Enter outside Notes or TextEdit, and using an unfamiliar control. Clipboard editing and browser tab controls are deferred to v0.2. Existing safety blocks and target/result checks remain active; password, payment, purchase, and deletion requests are blocked.
@@ -131,8 +131,8 @@ Speech transcription runs on your Mac. Jev requests send your spoken goal and bo
 
 ## Troubleshooting
 
-- **Check speech without desktop actions:** run `jevpilot --transcribe-only`, speak a few phrases, then press Control-C. This does not call Jev or require an API key or Accessibility access.
-- **Commands split too early:** increase the pause, for example `jevpilot --listen --auto-approve-basic --silence-ms 900`. Lower it for faster turn-taking.
+- **Check speech without desktop actions:** run `jvpilot --transcribe-only`, speak a few phrases, then press Control-C. This does not call Jev or require an API key or Accessibility access.
+- **Commands split too early:** increase the pause, for example `jvpilot --listen --auto-approve-basic --silence-ms 900`. Lower it for faster turn-taking.
 - **Quiet speech is missed:** lower `--speech-threshold` slightly from its default `0.012`; raise it if background noise triggers utterances.
 - **Desktop controls are unavailable:** check Accessibility for the same Terminal/Python host used to listen. The app must expose the relevant control or editable field.
 - **An app opens but a workflow stops:** check the result before trying again. Opening, creation, focus, and typing are separate steps.
@@ -147,10 +147,10 @@ The active runtime is the Python CLI in `app/`; the retained Swift sources are h
 uv venv --python 3.12
 source .venv/bin/activate
 uv pip install -e .
-jevpilot --listen --auto-approve-basic
+jvpilot --listen --auto-approve-basic
 ```
 
-The PyPI package and installed command are both named `jevpilot`; `python -m app` is also available. Package version and build settings live in `pyproject.toml`; dependencies are listed in `requirements.txt`.
+Jev Pilot's PyPI package and installed command are both named `jvpilot`; `python -m app` is also available. Package version and build settings live in `pyproject.toml`; dependencies are listed in `requirements.txt`.
 
 In each new terminal, run `source .venv/bin/activate` from the checkout before starting the development CLI or running checks. Install the test/build tools once, then run the checks:
 
