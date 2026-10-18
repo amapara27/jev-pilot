@@ -1,5 +1,9 @@
 # Jev Pilot
 
+<p align="center">
+  <img src="docs/assets/jev-pilot.webp" alt="Jev Pilot logo with a voice waveform and cursor inside a terminal window" width="720">
+</p>
+
 Control your Mac with spoken commands. Jev Pilot listens through your microphone, transcribes speech locally, asks Jev to choose a grounded action, and checks the result before continuing.
 
 This early macOS command-line release is designed for short, explicit commands. Start listening in Terminal, speak commands in the apps you want to control, and keep talking while the session remains open.
