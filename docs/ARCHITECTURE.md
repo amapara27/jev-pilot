@@ -59,6 +59,14 @@ rebuilds from source, checks archive contents/metadata, installs without depende
 into a temporary target and invokes both CLI entry paths outside the checkout.
 It reuses conda dependencies and does not prove a clean uv install or native access.
 
+`.github/workflows/ci.yml` runs on pushes and pull requests to `main`, or manually,
+using an Apple Silicon `macos-15` runner and uv/Python 3.12. It installs the project
+and test/build tools into `.venv`, runs offline tests and compilation checks, then
+builds distributions. It needs no API credentials or speech model download;
+native microphone and desktop acceptance remain separate. A required `test` check
+must be configured in GitHub branch rules; the publishing workflow does not wait
+for CI automatically.
+
 `.github/workflows/release.yml` builds distributions on an Ubuntu runner without
 importing the macOS runtime or installing its runtime dependencies. Manual dispatch
 builds an artifact only; a published GitHub release also requires its tag to equal
