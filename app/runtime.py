@@ -290,7 +290,10 @@ def run_goal(
                 report["outcome"] = "dry_run"
                 return report
             if policy == "confirm":
-                if not approve(action):
+                approved = approve(action)
+                if cancellation_requested():
+                    return report
+                if not approved:
                     report["outcome"] = "rejected"
                     return report
                 fresh = validate_target()

@@ -169,12 +169,13 @@ class NativeInteractions:
         branches = {branch for branch, names in MENU_BRANCHES.items() if not commands or set(commands) & names}
         menu_error, menu = ax.AXUIElementCopyAttributeValue(application, 'AXMenuBar', None)
         self.diagnostics['menu_bar_ax_error'] = int(menu_error)
-        queue = deque([menu, window] if branches else [window])
+        # Page widgets can expose the same tab/zoom roles as browser controls.
+        queue = deque((node, False) for node in ([menu, window] if branches else [window]))
         deferred = deque()
         deadline = monotonic() + 0.5
         text.scan_deadline = deadline
         while (queue or deferred) and len(visited) < 256 and monotonic() < deadline:
-            node = (queue or deferred).popleft()
+            node, in_webpage = (queue or deferred).popleft()
             if node is None or any(text.equal(node, old) for old in visited):
                 continue
             visited.append(node)
@@ -184,14 +185,14 @@ class NativeInteractions:
             if role == 'AXWebArea':
                 pages.append(node)
                 page_busy = page_busy or native_true(text.read(node, 'AXBusy'))
-            if role == 'AXTabGroup':
+            if role == 'AXTabGroup' and not in_webpage:
                 for tab in list(text.read(node, 'AXTabs') or text.read(node, 'AXChildren') or ())[:64]:
                     if text.read(tab, 'AXRole') in {'AXRadioButton', 'AXTab'} or text.read(tab, 'AXSubrole') == 'AXTabButton':
                         tabs.append((tab, native_true(text.read(tab, 'AXSelected')) or native_true(text.read(tab, 'AXValue'))))
             label = str(text.read(node, 'AXTitle') or text.read(node, 'AXDescription') or '')[:240].casefold().strip()
             if role == 'AXMenuBarItem' and label not in branches:
                 continue
-            if role in {'AXButton', 'AXPopUpButton', 'AXTextField'} and 'zoom' in label:
+            if not in_webpage and role in {'AXButton', 'AXPopUpButton', 'AXTextField'} and 'zoom' in label:
                 match = re.fullmatch(r'\s*(\d+(?:\.\d+)?)\s*%\s*', str(text.read(node, 'AXValue') or text.read(node, 'AXValueDescription') or ''))
                 if match:
                     zoom = float(match.group(1))
@@ -217,13 +218,14 @@ class NativeInteractions:
                     areas.append(node)
             if role not in {'AXTextArea', 'AXTextField', 'AXTable', 'AXList', 'AXOutline'}:
                 children = text.read(node, 'AXChildren') or ()
-                pending = list(children)[:max(0, 256 - len(queue) - len(deferred))]
+                pending = [(child, in_webpage or role == 'AXWebArea')
+                           for child in list(children)[:max(0, 256 - len(queue) - len(deferred))]]
                 if role == 'AXWebArea':
                     deferred.extend(pending)
                 elif not commands or set(commands) - WINDOW_COMMANDS.keys():
                     queue.extendleft(reversed(pending))
             if len(visited) == 128 and not any(text.equal(window, old) for old in visited):
-                queue.appendleft(window)
+                queue.appendleft((window, False))
         candidates = []
         self.diagnostics.update(visited_nodes=len(visited), scan_limit_reached=bool(queue or deferred),
                                 menu_command_count=len(menus), scroll_area_count=len(areas), tab_count=len(tabs))
@@ -500,17 +502,26 @@ class NativeInteractions:
                     return True
                 if target.command != 'close_tab' and len(observed.tabs) > len(target.tabs):
                     return True
-            if target.command in {'next_tab', 'previous_tab'} and len(target.tabs) == len(observed.tabs) and not self.same_tabs(target.tabs, observed.tabs):
-                return True
+            if target.command in {'next_tab', 'previous_tab'}:
+                if len(target.tabs) < 2 or len(target.tabs) != len(observed.tabs) or not all(
+                        self.text.equal(tab, current) for (tab, _), (current, _) in zip(target.tabs, observed.tabs)):
+                    return False
+                previous = [index for index, (_, selected) in enumerate(target.tabs) if selected]
+                current = [index for index, (_, selected) in enumerate(observed.tabs) if selected]
+                return len(previous) == 1 and current == [(previous[0] + (1 if target.command == 'next_tab' else -1)) % len(target.tabs)]
             if target.command == 'select_tab' and any(self.text.equal(tab, target.element) and selected for tab, selected in observed.tabs):
                 return True
             if target.command == 'reload' and (not target.page_busy and observed.page_busy or len(target.pages) == len(observed.pages) == 1 and not self.text.equal(target.pages[0], observed.pages[0])):
                 return True
-            if target.command in {'zoom_in', 'zoom_out', 'reset_zoom'} and target.reset_zoom_enabled is not None and observed.reset_zoom_enabled is not None and target.reset_zoom_enabled != observed.reset_zoom_enabled:
-                return True
+            if target.command in {'back', 'forward'}:
+                return bool(state.browser_url and state.browser_url != before.browser_url)
             if target.command in {'zoom_in', 'zoom_out', 'reset_zoom'}:
+                if before.browser_url != state.browser_url or not self.same_tabs(target.tabs, observed.tabs):
+                    return False
                 if target.zoom is not None and observed.zoom is not None:
                     return observed.zoom > target.zoom if target.command == 'zoom_in' else observed.zoom < target.zoom if target.command == 'zoom_out' else observed.zoom == 100
+                if target.command == 'reset_zoom' and target.reset_zoom_enabled is True and observed.reset_zoom_enabled is False:
+                    return True
                 for old, _, size in target.samples:
                     current_sample = next((sample for sample in observed.samples if self.text.equal(old, sample[0])), None)
                     if current_sample and all(value > 0 for value in (*size, *current_sample[2])):
@@ -519,7 +530,7 @@ class NativeInteractions:
                             return True
         application = self.text.ax.AXUIElementCreateApplication(target.pid)
         window, focus = self.text.read(application, 'AXFocusedWindow'), self.text.read(application, 'AXFocusedUIElement')
-        if target.command in {'select_tab', 'close_tab', 'zoom_in', 'zoom_out', 'reset_zoom'}:
+        if target.command in BROWSER_COMMANDS - {'address_bar'} | {'select_tab'}:
             return False
         return bool(window is not None and (not self.text.equal(window, target.window) or focus is not None and not self.text.equal(focus, target.focused))
                     or state.browser_url and state.browser_url != before.browser_url

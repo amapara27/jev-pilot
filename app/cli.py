@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import queue
+import select
 import sys
 import tempfile
 from pathlib import Path
@@ -20,6 +21,7 @@ from .models import ActionCandidate
 
 from .desktop import MacDesktop
 from .runtime import run_goal
+from .safety import requires_confirmation
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -29,7 +31,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("goal", nargs="*", help="Text goal, such as 'switch to Finder'.")
     parser.add_argument("--model", default="jev-latest")
     parser.add_argument("--dry-run", action="store_true", help="Choose without executing.")
-    parser.add_argument("--yes", action="store_true", help="Approve low-confidence supported native actions.")
+    parser.add_argument("--yes", action="store_true", help="Skip routine confidence prompts; keep risky interactions and unfamiliar controls interactive.")
     parser.add_argument('--auto-approve-basic', action='store_true', help='Skip confidence prompts for app opening/focus and supported web/Finder search; retain all native guards and other approvals.')
     parser.add_argument("--request-accessibility", action="store_true", help="Ask macOS for Accessibility access for this CLI host.")
     parser.add_argument("--listen", action="store_true", help="Continuously transcribe microphone utterances and send each final transcript to Jev.")
@@ -52,14 +54,24 @@ def _save_report(path: Path, report: dict[str, object]) -> None:
     os.replace(temporary, path)
 
 
-def _confirm_action(desktop, prompt):
-    """Restore the exact process after terminal approval; runtime rechecks its target."""
+def _confirm_action(desktop, prompt, *, cancel_event=None):
+    """Allow voice cancellation while waiting, then restore the exact approved process."""
 
     original = desktop.workspace.frontmostApplication()
     if not original:
         return False
     pid = int(original.processIdentifier())
-    if input(prompt).strip().casefold() != 'y':
+    if cancel_event is None:
+        answer = input(prompt)
+    else:
+        print(prompt, end='', flush=True)
+        while not cancel_event.is_set():
+            if select.select([sys.stdin], [], [], 0.05)[0]:
+                answer = sys.stdin.readline()
+                break
+        else:
+            return False
+    if (cancel_event is not None and cancel_event.is_set()) or answer.strip().casefold() != 'y':
         return False
     current = desktop.workspace.frontmostApplication()
     if current and int(current.processIdentifier()) == pid:
@@ -68,6 +80,8 @@ def _confirm_action(desktop, prompt):
         return False
     deadline = monotonic() + 2
     while monotonic() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            return False
         current = desktop.workspace.frontmostApplication()
         if current and int(current.processIdentifier()) == pid:
             return True
@@ -168,16 +182,16 @@ def _run_voice(
             capture_done.set()
 
     def approve(action: ActionCandidate) -> bool:
-        """Require interactive confirmation unless this invocation used --yes."""
+        """Skip routine confidence prompts with --yes; retain mandatory approvals."""
 
-        if args.yes and action.kind != "PRESS_CONTROL" and not action.parameters.get('requires_confirmation'):
+        if args.yes and not requires_confirmation(action):
             return True
         if not sys.stdin.isatty():
             return False
         approval_wait.set()
         print(f"Confirm spoken action: {action.description} [y/N] ", end="", file=output, flush=True)
         try:
-            return _confirm_action(target_desktop, '')
+            return _confirm_action(target_desktop, '', cancel_event=stopping)
         finally:
             approval_wait.clear()
 
@@ -209,7 +223,7 @@ def _run_voice(
                 committed.task_done()
             if prefix:
                 stopping.set()
-            else:
+            elif not stopping.is_set():
                 print('Command stopped. Still listening for a new command.', file=output, flush=True)
         else:
             print('Ready for the next command.', file=output, flush=True)
@@ -318,7 +332,9 @@ def main(
     target_desktop = desktop if desktop is not None else MacDesktop()
 
     def approve(action: ActionCandidate) -> bool:
-        if args.yes and action.kind != "PRESS_CONTROL" and not action.parameters.get('requires_confirmation'):
+        """Apply the same routine/risky approval boundary as listening mode."""
+
+        if args.yes and not requires_confirmation(action):
             return True
         if not sys.stdin.isatty():
             return False

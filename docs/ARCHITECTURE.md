@@ -53,7 +53,7 @@ is rejected; quote those words to insert them literally.
 
 Interaction snapshots retain native window/focus/editor handles and baselines
 locally. A bounded 256-node/half-second scan collects enabled English menu
-commands and scroll areas, preferring the area containing focus. Only requested English menu branches are scanned. Scroll/window-only goals start at the window, and webpage children are deferred behind browser controls. Window observation remains reserved before the node budget is exhausted. Text commands
+commands and scroll areas, preferring the area containing focus. Only requested English menu branches are scanned. Scroll/window-only goals start at the window, and webpage children are deferred behind browser controls. Traversal tracks AXWebArea descendants so webpage tab groups and chart zoom widgets cannot become browser tab/zoom observations. Window observation remains reserved before the node budget is exhausted. Text commands
 require a verifiable focused editor, copy/cut require selection, and select-all
 requires text. Browser commands require a known browser and an observed menu, but not a focused editor. Missing AXFocusedUIElement suppresses text/Tab/Escape commands only; menus, grounded scrolling and native window controls remain eligible. Safari named-tab selection uses observed AX tab buttons. Browser/menu/scroll commands bind window/page/tab identity without binding an unrelated editor or caret; text commands retain exact editor/focus checks.
 Menu shortcuts invoke AXPress; select-all uses a writable native UTF-16 selection
@@ -68,14 +68,14 @@ positions. Range, bounds, native scrollbar/window/focus and editor context are
 freshly validated. Verification requires movement in the requested direction
 or exact boundary position; no event replay. Safari standard WebKit AXScrollBar values use the documented normalized 0–1 range when both min/max attributes are unsupported. Unique axis-labelled child scrollbars are accepted. Paste reads bounded plain text only locally, checking stable changeCount before/after capture and before dispatch; neither clipboard contents nor native handles enter Jev state or reports. Copy/cut use changeCount plus unchanged/exactly cut editor evidence. TextEdit/Notes
 Enter verifies exact newline/caret; selection verifies the complete UTF-16 range.
-Paste verifies exact expected insertion and UTF-16 caret; undo/redo require changed editor values. Safari tab selection and closure require same-window native selection/count evidence or confirmed removal of the original window from AXWindows; lost Accessibility permission/window evidence cannot prove closure, while zoom uses observed percentages, same-element proportional geometry or reset availability. A successful selection can withdraw its action target, so verification uses another observation of the same native window. Other menu/navigation/focus actions need a native focus/window/document/browser URL change, changed tab selection/identity, or reload busy/page identity. Unobservable effects stay
+Paste verifies exact expected insertion and UTF-16 caret; undo/redo require changed editor values. Safari tab selection and closure require same-window native selection/count evidence or confirmed removal of the original window from AXWindows. Next/previous tab requires the adjacent selected tab in the same native tab order, including wraparound; a single unchanged tab cannot prove switching. Lost Accessibility permission/window evidence cannot prove closure. Zoom percentages must change in the requested direction on the same page/tab; reset availability can prove reset-to-default only, with proportional same-element geometry as the other zoom evidence. A successful selection can withdraw its action target, so verification uses another observation of the same native window. Tab creation/reopening needs count growth, history navigation needs a URL change, and reload needs busy/page identity evidence. Focus changes alone never prove these browser actions. Address-bar/find/key focus actions retain their specific focus evidence. Unobservable effects stay
 unverified even if the event was sent.
 
 --auto-approve-basic changes only confidence prompts for app activation, HTTP
 navigation and supported searches. It cannot bypass blocks, fresh identity checks
 or verification. Cut/close-tab and generic editor Enter always confirm, including with --yes; paste uses the normal confidence threshold. Terminal Y/N approval restores the exact original NSRunningApplication process with a bounded foreground wait, then runtime repeats all window/editor/text/selection checks; approval never transfers to another target. Continuous voice checkpoints after each run and survives
 per-goal failures; queued follow-ups behind a failure are discarded. New utterances
-resume with fresh context. Spoken stop and Control-C cancel before the next effect;
+resume with fresh context. Voice approval polls the terminal's input readiness with a 50 ms bound rather than blocking in input(); spoken stop or capture failure cancels a pending prompt without a keyboard answer. The approval reader checks cancellation before restoration; the runtime checks again immediately after approval returns, before recording rejection or validating/dispatching further actions, and records cancelled rather than rejected. Typed-only approval retains its existing input() path. Spoken stop and Control-C cancel before the next effect;
 capture errors, overload and failed committed prefixes still stop the session.
 The voice report retains failures and the process exit status reflects them.
 
@@ -149,8 +149,7 @@ and native PID lists are omitted only from provider application facts; local
 resolution, identity checks and schema-3 reports retain the complete metadata.
 Repeating a 263-app catalog across speculative heads caused HTTP 400 context
 overflow. Jev 1.13 permits 64k total input tokens and 32k for state plus the longest
-question; each Choice permits 255 options. Oversized Choice menus fail locally
-without truncation. Recognized max_tokens_exceeded error codes produce a static
+question; each Choice permits 255 options. Apply that bound after removing withheld operations and their target heads. For typing with more than 255 installed application targets, bind the exact named app context (or the current app for unnamed typing) before building choices. Keep the complete catalog locally and preserve the existing smaller-catalog typing choices. Pure web requests withdraw non-web effects; query extraction and URL generation are unchanged. Remaining oversized executable Choice menus fail locally without truncation. Recognized max_tokens_exceeded error codes produce a static
 context-limit reason; raw provider bodies remain excluded from reports.
 `.build/request-e2e.json` checks serialization growth, unchanged target selection
 and safe failures. Live synthetic reproduction rejected the old 362,749-byte
@@ -317,7 +316,7 @@ Regression scenarios cover 170-note trees, both pane orders, visible-children
 support or absence, and focus on row/table/window/body. Native Python insertion
 remains unverified on this tool host; native UI inspection alone does not prove it.
 
-Typing/app confidence below 0.65 and workflow/interaction confidence below 0.82 require approval. `--yes` can approve low-confidence supported actions, but unknown control presses and interaction targets requiring confirmation stay interactive. --auto-approve-basic applies only to app activation/navigation/search. Neither bypasses blocks or fresh validation.
+Typing/app confidence below 0.65 and workflow/interaction confidence below 0.82 require approval. `--yes` approves routine confidence prompts, including known document-creation controls. The shared safety.requires_confirmation predicate keeps unfamiliar control presses and interaction targets requiring confirmation interactive in both text and voice modes. --auto-approve-basic applies only to app activation/navigation/search. Neither bypasses blocks or fresh validation. Synthetic text/voice scenarios in .build/yes-workflow-approvals-e2e.json and .build/yes-risky-approvals-e2e.json cover low-confidence creation/typing, unknown/destructive controls, and mandatory cut/close-tab/generic-Enter approvals.
 Sensitive goal wording is blocked before Jev. `--dry-run` still sends bounded
 state to TypeSafe but stops before the first effect, including preparation.
 

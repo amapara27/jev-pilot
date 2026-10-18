@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import os
 from threading import Thread
 from time import monotonic, sleep
@@ -14,7 +15,7 @@ import numpy as np
 from app.cli import main
 from app.runtime import run_goal
 from test_typing_e2e import setup, Jev, Node, NativeQuartz
-from test_speech_e2e import FakeStreamingSession, FakeMicrophone
+from test_speech_e2e import FakeStreamingSession, FakeMicrophone, FakeSpeechModel
 from test_cli_e2e import FakeDesktop, FakeJev, SAFARI, TERMINAL
 
 
@@ -181,6 +182,95 @@ class InputActionsEndToEnd(unittest.TestCase):
         status = main(['switch to Terminal', '--auto-approve-basic', '--report', str(path)],
                       desktop=FakeDesktop(), client=FakeJev(confidence=0.3), output=io.StringIO())
         self.assertEqual(status, 0)
+
+    def test_yes_skips_routine_workflow_prompts_in_text_and_voice(self):
+        """Automatic routine controls still stop for unknown or destructive controls."""
+
+        from test_workflow_e2e import setup as workflow_setup
+        records = {}
+        for voice in (False, True):
+            for label, expected in [('New Document', 'completed'), ('Perform Unknown Task', 'rejected'),
+                                    ('Delete Document', 'blocked')]:
+                desktop, ax = workflow_setup('com.apple.TextEdit')
+                ax.control.attrs['AXTitle'] = label
+
+                def press(node, action):
+                    ax.effects.append(('press', label))
+                    old = ax.editor
+                    ax.editor = Node(**{**old.attrs, 'AXValue': '', 'AXSelectedTextRange': (0, 0)})
+                    ax.editor.writable = set(old.writable)
+                    ax.window.attrs['AXChildren'][0] = ax.editor
+                    ax.application.attrs['AXFocusedUIElement'] = ax.editor
+                    return 0
+
+                ax.AXUIElementPerformAction = press
+
+                class Client(InteractionJev):
+                    def system_one(self, state, questions, **kwargs):
+                        if not self.calls:
+                            control = next(key for key in questions['target_PRESS_CONTROL'].criteria
+                                           if state['semantic_options']['targets'][key]['label'] == label)
+                            self.plan[0] = ('PRESS_CONTROL', control, 'span_0')
+                        return super().system_one(state, questions, **kwargs)
+
+                client = Client(confidence=0.2, plan=[('PRESS_CONTROL', '', 'span_0'), ('TYPE_TEXT', 'editor', 'span_0')])
+                goal = 'create a new document in TextEdit and type "hello world"'
+
+                def capture(model, on_final, **kwargs):
+                    on_final(goal)
+                    return 1
+
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / 'report.json'
+                    with patch('app.speech_runtime.run_live_asr', side_effect=capture), \
+                            patch('app.cli.sys.stdin.isatty', return_value=True), \
+                            patch('app.cli._confirm_action', return_value=False) as prompt:
+                        status = main([*(['--listen'] if voice else [goal]), '--yes', '--report', str(path)],
+                                      desktop=desktop, client=client, output=io.StringIO(), speech_model=FakeSpeechModel())
+                    report = json.loads(path.read_text())
+                result = report['runs'][0] if voice else report
+                self.assertEqual(result['outcome'], expected, result)
+                self.assertEqual(status, int(expected != 'completed'))
+                self.assertEqual(prompt.call_count, int(expected == 'rejected'))
+                self.assertEqual(ax.editor.attrs['AXValue'], 'hello world' if expected == 'completed' else 'existing note')
+                self.assertEqual(len(ax.effects), 2 if expected == 'completed' else 0)
+                records[f'{"voice" if voice else "text"}_{label}'] = report
+        Path('.build/yes-workflow-approvals-e2e.json').write_text(json.dumps(records, indent=2))
+
+    def test_yes_keeps_risky_interaction_prompts_in_text_and_voice(self):
+        """Cut, tab closure and generic Enter never inherit routine auto-approval."""
+
+        records = {}
+        for voice in (False, True):
+            for command, goal, label, bundle in [('cut', 'cut', 'Cut', 'com.apple.TextEdit'),
+                                                ('close_tab', 'close this tab', 'Close Tab', 'com.apple.Safari'),
+                                                ('enter', 'hit enter', '', 'com.example.Editor')]:
+                desktop, ax, _, _ = input_setup(value='hello', selection=(0, 5), bundle=bundle)
+                desktop.interactions.pasteboard = SimpleNamespace(changeCount=lambda: 1)
+                menu = Node(AXRole='AXMenuItem', AXTitle=label, AXEnabled=True)
+                ax.application.attrs['AXMenuBar'] = Node(AXRole='AXMenuBar', AXChildren=[menu])
+                ax.AXUIElementCopyActionNames = lambda node, unused: (0, ['AXPress'] if node is menu else [])
+                client = InteractionJev(plan=[('KEYBOARD_ACTION', 'action:' + command, 'none')])
+
+                def capture(model, on_final, **kwargs):
+                    on_final(goal)
+                    return 1
+
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / 'report.json'
+                    with patch('app.speech_runtime.run_live_asr', side_effect=capture), \
+                            patch('app.cli.sys.stdin.isatty', return_value=True), \
+                            patch('app.cli._confirm_action', return_value=False) as prompt:
+                        main([*(['--listen'] if voice else [goal]), '--yes', '--report', str(path)],
+                             desktop=desktop, client=client, output=io.StringIO(), speech_model=FakeSpeechModel())
+                    report = json.loads(path.read_text())
+                result = report['runs'][0] if voice else report
+                self.assertEqual(result['outcome'], 'rejected', result)
+                self.assertEqual(prompt.call_count, 1)
+                self.assertFalse(result['effect_sent'])
+                self.assertEqual(ax.effects, [])
+                records[f'{"voice" if voice else "text"}_{command}'] = report
+        Path('.build/yes-risky-approvals-e2e.json').write_text(json.dumps(records, indent=2))
 
     def test_ordered_menu_commands_and_approval(self):
         records = []

@@ -15,7 +15,7 @@ This is an early macOS command-line tool. Start a listening session in Terminal,
 - **Search Finder:** enter a search query; opening a result requires a uniquely identifiable file.
 - **Keep listening:** run multiple commands in one session, with an option to skip routine open/search confirmation prompts.
 
-Controls depend on what the current app exposes through macOS Accessibility. Safari is the initial browser for tab/navigation testing. Newer clipboard, navigation, scrolling, Finder, window, and compound Notes workflows are experimental and still need real-app testing.
+Google and YouTube searches have been manually tested. Controls depend on what the current app exposes through macOS Accessibility; browser scrolling, zoom, and tab switching remain experimental. Safari is the initial browser for testing those controls. More complex workflows may stop when a required control or result cannot be observed.
 
 ## Set up
 
@@ -62,6 +62,21 @@ python -m app --listen --auto-approve-basic
 
 This skips confidence prompts for app opening/switching, website navigation, and supported web/Finder searches. Other approvals and safety checks stay active. To keep routine confidence prompts too, use `python -m app --listen`.
 
+To skip routine confidence prompts across supported commands, including typing, document creation, common controls, and scrolling, use:
+
+```sh
+python -m app --listen --yes
+```
+
+**These actions always ask for approval, even with `--yes`:**
+
+- Cutting text.
+- Closing a browser tab.
+- Pressing Enter/Return outside Notes or TextEdit.
+- Using an unfamiliar control whose effect is not classified as routine.
+
+Existing safety blocks and target/result checks remain active. Password, payment, purchase, and deletion requests remain blocked.
+
 1. Say a command, such as **“open Safari.”**
 2. Pause briefly to finish the utterance; the default pause is about 650 ms.
 3. Wait for the result and **“Ready for the next command.”**
@@ -74,6 +89,8 @@ A failed or declined command normally leaves listening active. Follow-up command
 ### Stop listening
 
 Say **“stop listening,” “stop pilot,”** or **“quit pilot.”** You can also press **Control-C** in Terminal.
+
+Spoken stop also cancels a pending approval prompt without requiring a keyboard answer.
 
 Stopping discards unfinished speech and pending commands, and cancels the current command before its next action. It cannot undo an action already sent. Run the start command again to begin another session.
 
@@ -113,7 +130,7 @@ Use short, explicit commands. For longer workflows, start with Notes, TextEdit, 
 
 ## Approvals and current limits
 
-Cut, closing a tab, and Enter outside Notes/TextEdit require approval. Low-confidence choices and unfamiliar controls can also prompt. `--auto-approve-basic` only relaxes routine open/search prompts; it does not bypass target checks or verification. Goals involving passwords, payments, purchases, or deletion are blocked.
+Cut, closing a tab, Enter outside Notes/TextEdit, and unfamiliar controls require approval even with `--yes`. Without `--yes`, low-confidence choices can also prompt. `--auto-approve-basic` only relaxes routine open/search prompts; `--yes` extends this to other supported routine commands, including known document-creation controls. Neither option bypasses target checks or verification. Goals involving passwords, payments, purchases, or deletion are blocked.
 
 An `unsupported` result means no suitable action was available. An `unverified` result means an action may have happened, but Jev Pilot could not confirm it. Check the app before repeating a command, especially note creation, typing, or cutting text.
 
@@ -134,6 +151,7 @@ Speech transcription runs on your Mac. Jev requests send your spoken goal and bo
 - **Desktop controls are unavailable:** check Accessibility from the same terminal and conda environment used to listen. An app must also expose the relevant control or editable field.
 - **App names are ambiguous or missing:** use the exact installed name. Restart the listener after installing an app. Duplicate names require a bundle identifier to distinguish them.
 - **An app opens but a workflow stops:** inspect the result before trying again; opening, creation, focus, and typing are separate steps.
+- **Scrolling, zoom, or tabs do not work:** use Safari for initial testing. A focus change alone does not count as success: scrolling needs movement, zoom needs a zoom change, and next/previous tab needs the requested tab selection. If the result is `unverified`, check the app before repeating the command.
 - **Need to share a failure:** the latest session report is saved after each command to `.build/python-cli-last.json`. Use `--report .build/my-session.json` to choose a different file. Remove private transcript/dictation content before sharing.
 
 ## Local development

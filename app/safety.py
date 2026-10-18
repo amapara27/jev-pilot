@@ -23,6 +23,16 @@ def blocked_goal(goal: str) -> bool:
     )
 
 
+def requires_confirmation(action: ActionCandidate) -> bool:
+    """Keep risky interactions and unfamiliar controls interactive even with --yes."""
+
+    if action.parameters.get('requires_confirmation'):
+        return True
+    return action.kind == 'PRESS_CONTROL' and action.parameters.get('label', '').casefold().strip('.…') not in {
+        'new', 'new document', 'new window', 'new tab', 'find', 'search', 'back', 'next', 'cancel', 'preferences', 'settings',
+    }
+
+
 def disposition(action: ActionCandidate, confidence: float, *, auto_approve_basic: bool = False) -> str:
     """Return allow, confirm, or deny independently of the model's recommendation."""
 
@@ -31,7 +41,7 @@ def disposition(action: ActionCandidate, confidence: float, *, auto_approve_basi
     if action.kind in {'KEYBOARD_ACTION', 'SCROLL'}:
         if action.parameters.get('bundle_identifier') in {'com.apple.Terminal', 'com.googlecode.iterm2'} and action.kind == 'KEYBOARD_ACTION' and action.parameters.get('command') not in WINDOW_COMMANDS:
             return 'deny'
-        return 'confirm' if action.parameters.get('requires_confirmation') or confidence < 0.82 else 'allow'
+        return 'confirm' if requires_confirmation(action) or confidence < 0.82 else 'allow'
     if action.kind in WEB_OPERATIONS:
         url = action.parameters.get("url")
         if not isinstance(url, str) or normalize_web_url(url) != url:
@@ -41,8 +51,7 @@ def disposition(action: ActionCandidate, confidence: float, *, auto_approve_basi
         label = action.parameters.get("label", "")
         if blocked_goal(label) or action.parameters.get("bundle_identifier") == "com.apple.Terminal":
             return "deny"
-        routine = label.casefold().strip(".…") in {"new", "new document", "new window", "new tab", "find", "search", "back", "next", "cancel", "preferences", "settings"}
-        return "allow" if routine and confidence >= 0.82 else "confirm"
+        return 'confirm' if requires_confirmation(action) or confidence < 0.82 else 'allow'
     if action.kind == "SEARCH" and (not action.parameters.get("text") or len(action.parameters["text"]) > 4096 or any(ord(c) < 32 or c in "\u2028\u2029" for c in action.parameters["text"])):
         return "deny"
     if action.kind == "OPEN_ITEM":

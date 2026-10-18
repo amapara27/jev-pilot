@@ -10,7 +10,7 @@ from typing import Any, Protocol, cast
 from typesafe_sdk import Choice, TypeSafeClient, TypeSafeError
 
 from .models import JevDecision, JSONValue
-from .semantics import SemanticError, SemanticMenu
+from .semantics import SemanticError, SemanticMenu, OPERATIONS
 from .web_navigation import WEB_OPERATIONS
 
 
@@ -100,9 +100,6 @@ def build_questions(menu: SemanticMenu) -> dict[str, Choice]:
             instructions=f"Assume {operation} is the next operation. Select its target for the transcription and recent verified steps. Full target facts are in semantic_options.targets. Choose only supplied IDs. Never substitute an app for an editor. none means no grounded target exists.",
             criteria=targets or {"none": "No grounded target."},
         )
-    for name, question in questions.items():
-        if len(question.criteria) > MAX_CHOICE_OPTIONS:
-            raise JevCallError(f"Jev question {name} has {len(question.criteria)} options; the API permits at most 255. No request or effect was sent.")
     return questions
 
 
@@ -194,8 +191,7 @@ def select_action(
     if "SEARCH" in remaining:
         withheld.update({"SELECT_ITEM", "OPEN_ITEM"})
     if remaining and remaining <= WEB_OPERATIONS:
-        withheld.update({"TYPE_TEXT", "FOCUS_FIELD", "OPEN_APP_FOR_TEXT", "FOCUS_APP_FOR_TEXT", "CREATE_NOTE",
-                         "PRESS_CONTROL", "PREPARE_SEARCH", "SEARCH", "SELECT_ITEM", "OPEN_ITEM", "RUN_COMMAND"})
+        withheld.update(set(OPERATIONS) - WEB_OPERATIONS - {'STOP', 'UNSUPPORTED'})
     questions["operation"].criteria = {key: criterion for key, criterion in questions["operation"].criteria.items() if key not in withheld}
     for operation in withheld:
         questions[f'target_{operation}'].criteria = {'none': 'This operation is unavailable for this step.'}
@@ -210,6 +206,9 @@ def select_action(
                   for operation, facts in menu.operation_criteria().items()}
     eligible_payloads = {key for operation in questions['operation'].criteria for key in operations[operation]['available_payloads']}
     questions['payload'].criteria = {key: facts for key, facts in menu.payloads.items() if key in eligible_payloads}
+    for name, question in questions.items():
+        if len(question.criteria) > MAX_CHOICE_OPTIONS:
+            raise JevCallError(f"Jev question {name} has {len(question.criteria)} options; the API permits at most 255. No request or effect was sent.")
     state["semantic_options"] = {"operations": operations,
                                  "targets": targets, "payloads": menu.payloads}
     started = perf_counter_ns()

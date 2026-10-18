@@ -11,6 +11,7 @@ from AppKit import NSWorkspace, NSWorkspaceOpenConfiguration
 from Foundation import NSDate, NSRunLoop, NSBundle, NSURL
 
 from .models import ActionCandidate
+from .decision import MAX_CHOICE_OPTIONS
 from .semantics import SemanticMenu, extract_payloads, required_workflow_operations
 from .text_input import NativeText, TextField, TextInputError
 from .workflows import NativeWorkflows, WorkflowTarget, WORKFLOW_KINDS, file_identity
@@ -255,6 +256,21 @@ class MacDesktop:
         if {'PRESS_CONTROL', 'TYPE_TEXT'} <= required and state.active:
             return {'mode':'workflow', 'bundle':state.active.bundle_id,
                     'operations':['PRESS_CONTROL', 'FOCUS_FIELD', 'TYPE_TEXT', 'KEYBOARD_ACTION', 'SCROLL', 'STOP', 'UNSUPPORTED']}
+        # Narrow oversized app heads without changing established smaller-catalog typing choices.
+        if 'TYPE_TEXT' in required and state.active and sum(facts.get('scope') == 'application' for facts in targets.values()) > MAX_CHOICE_OPTIONS:
+            typing = re.search(r'\b(?:type|write|dictate|insert)\s+', masked, re.I)
+            prefix, suffix = masked[:typing.start()], masked[typing.end():]
+            names = [match.group(1).strip(' .!?').casefold() for match in re.finditer(
+                r'\b(?:open|launch|focus|switch\s+to)\s+(.+?)(?=\s+(?:and|then)\b|[,;]|$)', prefix, re.I)]
+            names.extend(match.group(1).strip(' .!?').casefold() for match in re.finditer(
+                r'\b(?:in|using|with)\s+(.+?)(?=\s+(?:and|then)\b|[.!?]*$)', suffix, re.I))
+            bundles = {key for key, facts in targets.items() if facts.get('scope') == 'application'
+                       and set(names) & {key.casefold(), facts['name'].casefold(), *facts['aliases']}}
+            if len(bundles) > 1:
+                raise DesktopError('Typing names multiple apps; no editor or app was guessed.')
+            return {'mode':'typing', 'bundle':next(iter(bundles), state.active.bundle_id),
+                    'operations':['OPEN_APP', 'FOCUS_APP', 'OPEN_APP_FOR_TEXT', 'FOCUS_APP_FOR_TEXT',
+                                  'FOCUS_FIELD', 'TYPE_TEXT', 'KEYBOARD_ACTION', 'SCROLL', 'STOP', 'UNSUPPORTED']}
         window_goal = re.fullmatch(r'\s*(?:please\s+)?(?:minimi[zs]e|maximi[zs]e|enter\s+full\s*screen)\s+(?:in\s+)?(.+?)\s*[.!?]*', masked, re.I)
         if window_goal and state.active:
             name = window_goal.group(1).strip(' .!?').casefold()
