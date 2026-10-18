@@ -42,12 +42,6 @@ def same_created_note(desktop: object, created: object, state: object) -> bool:
                 and selected_notes(created) == selected_notes(state))
 
 
-def verify_app(desktop: object, action: ActionCandidate, timeout_seconds: float = 3) -> bool:
-    """Keep app-only callers on the same native outcome verification path."""
-
-    return verify_action(desktop, action, None, timeout_seconds)
-
-
 def verify_action(desktop: object, action: ActionCandidate, before: object, timeout_seconds: float = 3,
                   *, observations: list | None = None, diagnostics: dict | None = None, cancel_event=None) -> bool:
     """Wait for preparation readiness or the exact effect, without replaying dispatch."""

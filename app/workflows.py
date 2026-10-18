@@ -49,7 +49,7 @@ class WorkflowTarget:
     expanded: bool | None = None
 
     def provider_target(self):
-        """Expose file identity paths, never existing query/document contents or handles."""
+        """Build target facts; the outgoing request strips full Finder URLs."""
 
         return {"scope": "control" if self.kind == "control" else "finder_item", "bundle_identifier": self.bundle_id,
                 "process_identifier": self.pid, "label": self.label, "url": self.url,
@@ -137,7 +137,8 @@ class NativeWorkflows:
                 resolved = file_identity(text.read(node, "AXURL"))
                 if resolved and text.settable(node, "AXSelected") and available:
                     kind, (url, identity) = "item", resolved
-                    label = label or Path(unquote(urlparse(url).path)).name[:240]
+                    # Finder's AX title/description can include a full private path.
+                    label = Path(unquote(urlparse(url).path)).name[:240]
             if kind and (window is not None or bundle == FINDER and kind == 'find'):
                 old = next((item for item in self.previous if item.pid == pid and text.equal(item.element, node)), None)
                 identifier = old.id if old else f"workflow_{self.next_id}"

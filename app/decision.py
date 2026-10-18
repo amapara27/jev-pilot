@@ -197,9 +197,10 @@ def select_action(
         questions[f'target_{operation}'].criteria = {'none': 'This operation is unavailable for this step.'}
     compatible = {key for operation in questions['operation'].criteria
                   for key in questions[f'target_{operation}'].criteria}
-    # App IDs are dictionary keys; native PID lists cannot affect a bundle-level choice.
+    # Keep full Finder URLs in the local menu; Jev chooses file IDs and labels.
     targets = {key: {name: value for name, value in facts.items()
-                     if facts.get("scope") != "application" or name not in {"bundle_identifier", "process_identifiers"}}
+                     if not (facts.get("scope") == "application" and name in {"bundle_identifier", "process_identifiers"}
+                             or facts.get("scope") == "finder_item" and name == "url")}
                for key, facts in menu.targets.items() if key in compatible}
     # Closed target Choices already encode compatibility; repeating their lists bloats state.
     operations = {operation: {key: value for key, value in facts.items() if key != 'available_targets'}

@@ -607,9 +607,12 @@ class WorkflowEndToEnd(unittest.TestCase):
             file = Path(directory) / "resume.txt"
             file.write_text("disposable fixture")
             desktop, ax = setup("com.apple.finder", file.as_uri())
+            ax.item.attrs["AXTitle"] = str(file.resolve())
+            requests = []
             # The provider chooses the real, locally grounded item ID each time.
             class FinderJev(Jev):
                 def system_one(self, state, questions, *, model=None):
+                    requests.append({"state": state, "criteria": {name: choice.criteria for name, choice in questions.items()}})
                     if len(self.calls) in {1, 2}:
                         operation = "SELECT_ITEM" if len(self.calls) == 1 else "OPEN_ITEM"
                         item = next(key for key in questions[f"target_{operation}"].criteria
@@ -623,6 +626,11 @@ class WorkflowEndToEnd(unittest.TestCase):
             self.assertTrue(ax.item.attrs["AXSelected"])
             self.assertEqual([effect[0] for effect in ax.effects], ["AXFocused", "AXValue", "AXSelected", "press"])
             self.assertEqual([(event['code'], event['down']) for event in desktop.text.quartz.events], [(36, True), (36, False)])
+            request_text = json.dumps(requests)
+            self.assertFalse(str(file.resolve()) in request_text or file.resolve().as_uri() in request_text,
+                             "A full Finder path entered the outgoing Jev request.")
+            self.assertEqual(report["decision"]["selected_candidate"]["parameters"]["url"], file.resolve().as_uri())
+            self.assertEqual(report["decision"]["semantic"]["target"]["label"], "resume.txt")
             cases["finder_search_select_open"] = report
 
             desktop, ax = setup("com.apple.finder", file.as_uri())
@@ -650,8 +658,10 @@ class WorkflowEndToEnd(unittest.TestCase):
             cases["multiple_selection_blocked"] = {"effects": len(ax.effects)}
 
             desktop, ax = setup("com.apple.finder", file.as_uri())
-            duplicate = Node(**{**ax.item.attrs, "AXURL": (Path(directory) / "other.txt").as_uri()})
-            Path(directory, "other.txt").write_text("other")
+            other = Path(directory) / "other" / "resume.txt"
+            other.parent.mkdir()
+            other.write_text("other")
+            duplicate = Node(**{**ax.item.attrs, "AXURL": other.as_uri()})
             duplicate.writable.add("AXSelected")
             ax.window.attrs["AXChildren"].append(duplicate)
             menu = desktop.semantic_menu("open resume.txt", desktop.snapshot())

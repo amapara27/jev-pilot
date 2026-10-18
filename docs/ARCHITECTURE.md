@@ -1,6 +1,6 @@
 # Jev Pilot architecture
 
-The active runtime is `jev-pilot` (also `python -m app`): typed goals or continuous local Nemotron
+The active runtime is `jevpilot` (also `python -m app`): typed goals or continuous local Nemotron
 speech, one factorized Jev request per step, bounded typing preparation, native
 app/editor effects, and verified reports. Swift sources are retired references.
 
@@ -41,7 +41,7 @@ voice: microphone callback → bounded ordered PCM queue → Nemotron streaming 
 
 ## Packaging and installed paths
 
-`pyproject.toml` defines distribution `jev-pilot` version `0.1.0` with Python >=3.12,
+`pyproject.toml` defines distribution `jevpilot` version `0.1.0` with Python >=3.12,
 the setuptools build backend and console entry point `app.cli:main`. Only the `app`
 package enters the wheel; dependencies come from `requirements.txt` through
 setuptools dynamic metadata. Conda development and `python -m app` remain supported.
@@ -58,6 +58,15 @@ keep their explicit repository-local artifacts. Packaging E2E builds source/whee
 rebuilds from source, checks archive contents/metadata, installs without dependencies
 into a temporary target and invokes both CLI entry paths outside the checkout.
 It reuses conda dependencies and does not prove a clean uv install or native access.
+
+`.github/workflows/release.yml` builds distributions on an Ubuntu runner without
+importing the macOS runtime or installing its runtime dependencies. Manual dispatch
+builds an artifact only; a published GitHub release also requires its tag to equal
+`v` plus the package version. A separate dependent publish job downloads that same
+artifact and calls `uv publish --trusted-publishing always` using the `pypi`
+environment and job-scoped `id-token: write`. The build job has no publishing
+identity. Actions are pinned to commit IDs; no long-lived PyPI or TypeSafe key is
+needed. Native tests remain local acceptance, separate from this packaging workflow.
 
 ## Semantic authority and preparation
 
@@ -318,8 +327,16 @@ counts so missing editors can be distinguished from missing text/caret/write sup
 
 Provider state contains the goal, compact app/readiness facts, bounded field labels
 (up to 240 characters), roles/focus/capabilities, span proposals, and prior verified
-operation names. Existing AX document values, selected text, and native handles
-stay local. Labels may themselves contain app-provided text. Schema-3 reports
+operation names. Full Finder item URLs are removed at the TypeSafe request boundary;
+Jev chooses opaque IDs using filenames and selection facts; file labels use the
+resolved basename rather than potentially path-bearing AX titles. The local semantic menu
+retains the URLs and native file identities for resolution, safety and fresh-target
+checks. Duplicate filenames remain ambiguous and cannot be selected. Paths explicitly
+spoken in the goal still enter the request; selected paths can remain in local reports.
+Existing AX document values, selected text, and native handles stay local. Labels may
+themselves contain app-provided text. Users must not speak credentials in v0.1; the
+word-based safety gate is not a credential-pattern detector or report redaction layer.
+Schema-3 reports
 contain semantic decisions, exact dictated payloads, per-factor metadata, step
 outcomes, aggregate timings, and completion scope. `single_insertion` verifies
 one insertion; `selected_action` verifies ordinary activation. `verified_workflow`
