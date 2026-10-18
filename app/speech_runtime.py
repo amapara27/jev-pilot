@@ -85,7 +85,7 @@ class SoundDeviceAudioSource:
             import sounddevice as sd
         except ImportError as error:
             raise AudioInputError(
-                "Microphone capture requires sounddevice; reinstall requirements.txt."
+                "Microphone capture requires sounddevice; reinstall Jev Pilot with its dependencies."
             ) from error
 
         def callback(indata, frames, timing, status):

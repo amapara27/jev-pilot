@@ -12,7 +12,7 @@ from app.config import ConfigurationError, load_api_key
 
 
 class ConfigurationTests(unittest.TestCase):
-    """Verifies environment-first, repository-.env-second key loading."""
+    """Verify environment and explicit checkout keys without reading real user configuration."""
 
     def test_environment_key_takes_precedence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -32,7 +32,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_reports_missing_key_without_secret_content(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            with patch.dict(os.environ, {}, clear=True):
+            with patch.dict(os.environ, {}, clear=True), patch('app.config.Path.home', return_value=Path(directory)):
                 with self.assertRaisesRegex(ConfigurationError, "TYPESAFE_API_KEY"):
                     load_api_key(Path(directory))
 

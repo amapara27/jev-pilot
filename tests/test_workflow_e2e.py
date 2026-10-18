@@ -77,6 +77,108 @@ def setup(bundle, url=None):
 class WorkflowEndToEnd(unittest.TestCase):
     """Verify exact effects, missing capabilities, duplicate identity and stale targets."""
 
+    def test_finder_search_from_an_active_app_without_a_window(self):
+        """The observed Find menu can open a search window before query entry."""
+
+        cases = {}
+        for mode in ('ready', 'background', 'ignored', 'window_error', 'disabled_find', 'secure_menu', 'permission_lost', 'app_drift'):
+            desktop, ax = setup('com.apple.finder')
+            equal = desktop.text.equal
+
+            def compare(a, b):
+                self.assertIsNotNone(a)
+                self.assertIsNotNone(b)
+                return equal(a, b)
+
+            desktop.text.equal = compare
+            ax.application.attrs.pop('AXFocusedWindow')
+            ax.application.attrs.pop('AXFocusedUIElement')
+            initial = desktop.snapshot()
+            self.assertFalse(initial.focused_window_available)
+            if mode == 'background':
+                desktop.workspace.bundle = 'com.apple.TextEdit'
+
+                def activate(url, configuration, callback):
+                    desktop.workspace.bundle = 'com.apple.finder'
+                    desktop.workspace.activation_count += 1
+                    callback(desktop.workspace, None)
+
+                desktop.workspace.openApplicationAtURL_configuration_completionHandler_ = activate
+            menu = ax.application.attrs['AXMenuBar']
+            if mode == 'disabled_find':
+                ax.control.attrs['AXEnabled'] = False
+            if mode == 'secure_menu':
+                menu.attrs['AXProtectedContent'] = True
+            read = ax.AXUIElementCopyAttributeValue
+
+            def observe(node, attribute, unused):
+                if node is ax.application and attribute == 'AXFocusedWindow' and attribute not in node.attrs:
+                    return (-25204 if mode == 'window_error' else -25212), None
+                return read(node, attribute, unused)
+
+            ax.AXUIElementCopyAttributeValue = observe
+
+            def press(node, action):
+                ax.effects.append(('press', node.attrs['AXTitle']))
+                if mode != 'ignored':
+                    ax.application.attrs.update(AXFocusedWindow=ax.window, AXFocusedUIElement=ax.editor)
+                return 0
+
+            ax.AXUIElementPerformAction = press
+
+            def drift():
+                if mode == 'permission_lost':
+                    ax.trusted = False
+                elif mode == 'app_drift':
+                    desktop.workspace.bundle = 'com.apple.TextEdit'
+
+            plan = [('PREPARE_SEARCH', 'com.apple.finder', 'span_0'), ('SEARCH', 'com.apple.finder', 'span_0')]
+            if mode == 'background':
+                plan.insert(0, ('OPEN_APP_FOR_WORKFLOW', 'com.apple.finder', 'span_0'))
+            client = Jev(plan=plan, after_call=drift)
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'finder.json'
+                from app.verification import verify_action
+                with patch('app.runtime.verify_action', side_effect=lambda *args, **kwargs: verify_action(*args, timeout_seconds=0, **kwargs)):
+                    main(['Open Finder and Search for Resumes.', '--yes', '--report', str(path)],
+                         desktop=desktop, client=client, output=io.StringIO())
+                result = json.loads(path.read_text())
+            if mode in {'ready', 'background'}:
+                self.assertEqual(result['outcome'], 'completed', result)
+                self.assertEqual(ax.editor.attrs['AXValue'], 'Resumes.')
+                self.assertEqual([step['decision']['semantic']['operation'] for step in result['steps']], [item[0] for item in plan])
+                self.assertEqual(sum(effect == ('press', 'Find') for effect in ax.effects), 1)
+                self.assertEqual(len(desktop.text.quartz.events), 2)
+            else:
+                self.assertNotEqual(result['outcome'], 'completed', result)
+                self.assertEqual(len(ax.effects), int(mode == 'ignored'))
+                self.assertEqual(desktop.text.quartz.events, [])
+                self.assertEqual(len(client.calls), 1)
+            cases[mode] = result
+        Path('.build/finder-windowless-e2e.json').write_text(json.dumps(cases, indent=2))
+
+    @unittest.skipUnless(os.environ.get('JEV_LIVE_JEV') == '1', 'Live Jev opt-in; Finder stays synthetic.')
+    def test_live_jev_windowless_finder_search(self):
+        """Confirm Jev chooses menu preparation before query entry without a window."""
+
+        desktop, ax = setup('com.apple.finder')
+        ax.application.attrs.pop('AXFocusedWindow')
+        ax.application.attrs.pop('AXFocusedUIElement')
+        read = ax.AXUIElementCopyAttributeValue
+        ax.AXUIElementCopyAttributeValue = lambda node, name, unused: (-25212, None) if node is ax.application and name == 'AXFocusedWindow' and name not in node.attrs else read(node, name, unused)
+
+        def press(node, action):
+            ax.effects.append(('press', node.attrs['AXTitle']))
+            ax.application.attrs.update(AXFocusedWindow=ax.window, AXFocusedUIElement=ax.editor)
+            return 0
+
+        ax.AXUIElementPerformAction = press
+        result = run_goal('Open Finder and search for "Resumes"', desktop, approve=lambda _: True)
+        Path('.build/live-finder-windowless-e2e.json').write_text(json.dumps(result, indent=2))
+        self.assertEqual(result['outcome'], 'completed', result.get('reason'))
+        self.assertEqual(ax.editor.attrs['AXValue'], 'Resumes')
+        self.assertEqual(sum(effect == ('press', 'Find') for effect in ax.effects), 1)
+
     @unittest.skipUnless(os.environ.get("JEV_LIVE_JEV") == "1", "Live Jev is explicitly opt-in; native services remain fake.")
     def test_live_jev_progression_with_synthetic_native_services(self):
         """Exercise the production CLI/provider adapter without changing the desktop."""
@@ -389,7 +491,7 @@ class WorkflowEndToEnd(unittest.TestCase):
                     self.assertEqual(status, 0, report)
                     self.assertEqual(report["outcome"], "completed")
                     self.assertEqual(len(client.calls), 1)
-                    self.assertEqual(window_reads[0], 1)
+                    self.assertEqual(window_reads[0], 2)  # Handle validity probe plus snapshot; no readiness polling.
                     self.assertEqual(ax.effects, [])
                 cases[f"{'focus' if running else 'open'}_{mode}"] = {"window_reads": window_reads[0], "provider_calls": len(client.calls), "activation_count": workspace.activation_count, "report": report}
         artifact = Path(__file__).resolve().parents[1] / ".build/workflow-readiness-e2e.json"

@@ -1,6 +1,6 @@
 # Jev Pilot architecture
 
-The active runtime is `python -m app`: typed goals or continuous local Nemotron
+The active runtime is `jev-pilot` (also `python -m app`): typed goals or continuous local Nemotron
 speech, one factorized Jev request per step, bounded typing preparation, native
 app/editor effects, and verified reports. Swift sources are retired references.
 
@@ -35,9 +35,29 @@ voice: microphone callback → bounded ordered PCM queue → Nemotron streaming 
 | `app/models.py` | Executable actions and validated semantic decisions. |
 | `app/safety.py` | Sensitive-goal blocking and local confidence approval. |
 | `app/verification.py` | Verify foreground, focused identity, or exact resulting text/caret; never replay. |
-| `app/config.py` | Environment/`.env` keys parsed as data, excluded from reports. |
+| `app/config.py` | User-data paths and environment/checkout/user `.env` keys parsed as data, excluded from reports. |
 | `app/speech_model.py` | Lazily load the pinned MLX-Audio Nemotron model from the local Hugging Face cache. |
 | `app/speech_runtime.py` | Capture mono audio, bound backlog, stream one decoder consumer, and commit final text at EOU. |
+
+## Packaging and installed paths
+
+`pyproject.toml` defines distribution `jev-pilot` version `0.1.0` with Python >=3.12,
+the setuptools build backend and console entry point `app.cli:main`. Only the `app`
+package enters the wheel; dependencies come from `requirements.txt` through
+setuptools dynamic metadata. Conda development and `python -m app` remain supported.
+
+`user_data_directory()` resolves `~/Library/Application Support/Jev Pilot` without
+creating it. API-key precedence is environment, source-checkout `.env`, then user
+`.env` in that directory. An explicit `load_api_key(root)` retains that root's
+`.env` precedence. The implicit package parent qualifies as a checkout only if
+`pyproject.toml` exists; neither an installed site-packages `.env` nor an arbitrary
+current-directory `.env` is loaded. No key is copied into reports or package metadata.
+Default text/voice reports use `Reports/python-cli-last.json` under user data;
+explicit `--report` paths and atomic writes are unchanged. Native acceptance scripts
+keep their explicit repository-local artifacts. Packaging E2E builds source/wheel,
+rebuilds from source, checks archive contents/metadata, installs without dependencies
+into a temporary target and invokes both CLI entry paths outside the checkout.
+It reuses conda dependencies and does not prove a clean uv install or native access.
 
 ## Semantic authority and preparation
 

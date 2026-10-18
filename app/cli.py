@@ -18,6 +18,7 @@ import ApplicationServices as AX
 from AppKit import NSApplicationActivateIgnoringOtherApps
 from Foundation import NSDate, NSRunLoop
 from .models import ActionCandidate
+from .config import user_data_directory
 
 from .desktop import MacDesktop
 from .runtime import run_goal
@@ -39,7 +40,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--stream-prefixes", action="store_true", help="With --listen, queue stable app-opening clauses before EOU; completed effects cannot be taken back.")
     parser.add_argument("--silence-ms", type=int, default=650, help="Quiet audio needed to commit an utterance (default: 650 ms).")
     parser.add_argument("--speech-threshold", type=float, default=0.012, help="RMS threshold for detecting speech (default: 0.012).")
-    parser.add_argument("--report", type=Path, default=Path(".build/python-cli-last.json"))
+    parser.add_argument("--report", type=Path, default=user_data_directory() / "Reports" / "python-cli-last.json",
+                        help="Save the session report to this path (default: %(default)s).")
     return parser
 
 

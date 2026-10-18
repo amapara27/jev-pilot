@@ -17,14 +17,14 @@ def load_speech_model(model_id: str = DEFAULT_MODEL) -> object:
         from mlx_audio.stt import load
     except ImportError as error:
         raise RuntimeError(
-            "MLX-Audio is not installed in this Python environment; run "
-            "python -m pip install -r requirements.txt."
+            "MLX-Audio is not installed in this Python environment; "
+            "reinstall Jev Pilot with its dependencies."
         ) from error
 
     model = load(model_id)
     if not callable(getattr(model, "create_streaming_session", None)):
         raise RuntimeError(
             f"{model_id} did not expose MLX-Audio's streaming-session API. "
-            "Install the pinned project requirements and retry."
+            "Reinstall Jev Pilot with its pinned dependencies and retry."
         )
     return model

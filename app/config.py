@@ -1,4 +1,4 @@
-"""Load the TypeSafe key without evaluating or printing process secrets."""
+"""Resolve user-data paths and load the TypeSafe key without exposing secrets."""
 
 from __future__ import annotations
 
@@ -18,20 +18,32 @@ def repository_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def user_data_directory() -> Path:
+    """Keep installed configuration and reports outside the working directory."""
+
+    return Path.home() / "Library" / "Application Support" / "Jev Pilot"
+
+
 def load_api_key(root: Path | None = None) -> str:
-    """Load the API key from the environment, then the repository .env file."""
+    """Load the key from the environment, checkout .env, then user .env."""
 
     # Environment variables win so CI and temporary overrides need no file change.
     environment_key = os.environ.get("TYPESAFE_API_KEY", "").strip()
     if environment_key:
         return environment_key
 
-    # dotenv_values reads the file without mutating the current process environment.
-    values = dotenv_values((root or repository_root()) / ".env")
-    file_key = (values.get("TYPESAFE_API_KEY") or "").strip()
-    if file_key:
-        return file_key
+    paths = [user_data_directory() / ".env"]
+    source = root if root is not None else repository_root()
+    # A wheel's site-packages parent is not a checkout or a configuration source.
+    if root is not None or (source / "pyproject.toml").is_file():
+        paths.insert(0, source / ".env")
+    for path in paths:
+        values = dotenv_values(path)
+        file_key = (values.get("TYPESAFE_API_KEY") or "").strip()
+        if file_key:
+            return file_key
 
     raise ConfigurationError(
-        "TYPESAFE_API_KEY is missing. Set it in the environment or repository .env file."
+        f"TYPESAFE_API_KEY is missing. Set it in the environment or {user_data_directory() / '.env'} "
+        "(or the source checkout's .env file)."
     )
