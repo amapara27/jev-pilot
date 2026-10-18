@@ -304,32 +304,43 @@ class NativeInteractions:
             ancestor = text.read(ancestor, 'AXParent')
             if ancestor is None:
                 break
+        self.diagnostics['scrollbar_checks'] = []
         for area in areas[:16]:
             position, size = self.geometry(area, 'AXPosition', ax.kAXValueCGPointType), self.geometry(area, 'AXSize', ax.kAXValueCGSizeType)
             if not position or not size or size[0] <= 0 or size[1] <= 0:
+                self.diagnostics['scroll_geometry_unavailable'] = self.diagnostics.get('scroll_geometry_unavailable', 0) + 1
                 continue
             point = (position[0] + size[0] / 2, position[1] + size[1] / 2)
             label = str(text.read(area, 'AXDescription') or text.read(area, 'AXTitle') or 'Scrollable area')[:240]
             for attribute, directions in [('AXVerticalScrollBar', ('up', 'down')), ('AXHorizontalScrollBar', ('left', 'right'))]:
                 bar = self.scrollbar(area, attribute)
+                check = {'axis': directions[0], 'bar_present': bar is not None}
+                self.diagnostics['scrollbar_checks'].append(check)
                 if bar is None:
                     continue
                 enabled = text.read(bar, 'AXEnabled')
                 if enabled is not None and not native_true(enabled):
                     continue
-                value, minimum, maximum = (text.read(bar, key) for key in ('AXValue', 'AXMinValue', 'AXMaxValue'))
-                missing_range = minimum is None and maximum is None and all(ax.AXUIElementCopyAttributeValue(bar, key, None)[0] == -25205 for key in ('AXMinValue', 'AXMaxValue'))
-                if missing_range and state.active.bundle_id == 'com.apple.Safari' and text.read(bar, 'AXRole') == 'AXScrollBar':
-                    # WebKit exposes standard scrollbars as currentPos/maximum, not min/max attributes.
+                reads = [ax.AXUIElementCopyAttributeValue(bar, key, None) for key in ('AXValue', 'AXMinValue', 'AXMaxValue')]
+                value, minimum, maximum = (item if error == 0 else None for error, item in reads)
+                missing_range = all(error == -25205 for error, _ in reads[1:])
+                normalized = missing_range and state.active.bundle_id in {'com.apple.Safari', 'com.apple.finder'} and text.read(bar, 'AXRole') == 'AXScrollBar'
+                if normalized:
+                    # Standard WebKit/AppKit scrollers expose a normalized position without min/max.
                     minimum, maximum = 0, 1
-                if not all(isinstance(v, (float, int)) and not isinstance(v, bool) and math.isfinite(v) for v in (value, minimum, maximum)) or not minimum <= value <= maximum or minimum == maximum:
+                valid = all(isinstance(v, (float, int)) and not isinstance(v, bool) and math.isfinite(v) for v in (value, minimum, maximum)) and minimum <= value <= maximum and minimum != maximum
+                writable = text.settable(bar, 'AXValue')
+                check.update(value_ax_error=int(reads[0][0]), min_ax_error=int(reads[1][0]), max_ax_error=int(reads[2][0]),
+                             value_type=type(value).__name__[:64], range_source='normalized' if normalized else 'native',
+                             valid_range=bool(valid), position_writable=writable)
+                if not valid:
                     continue
                 for direction, available in zip(directions, (value > minimum, value < maximum)):
                     if available:
                         for suffix in ('', '_small', '_large'):
                             add('scroll_' + direction + suffix, area, bar=bar, value=value, minimum=minimum, maximum=maximum, point=point, area_label=label)
                         if direction in {'up', 'down'}:
-                            if text.settable(bar, 'AXValue'):
+                            if writable:
                                 add('scroll_top' if direction == 'up' else 'scroll_bottom', area, bar=bar, value=value, minimum=minimum, maximum=maximum, point=point, area_label=label)
         self.previous = tuple(candidates)
         return self.previous
@@ -446,7 +457,7 @@ class NativeInteractions:
         if not state.ax_trusted:
             return False
         if target.window_attribute:
-            application = self.text.ax.AXUIElementCreateApplication(target.pid)
+            application = self.text.application(target.pid)
             windows = self.text.read(application, 'AXWindows')
             present = windows is not None and any(self.text.equal(window, target.window) for window in windows)
             return bool(present and native_true(self.text.read(target.window, target.window_attribute))
@@ -454,7 +465,7 @@ class NativeInteractions:
         if state.active != before.active:
             return False
         if target.command.startswith('scroll_'):
-            application = self.text.ax.AXUIElementCreateApplication(target.pid)
+            application = self.text.application(target.pid)
             if not self.text.equal(self.text.read(application, 'AXFocusedWindow'), target.window):
                 return False
             attribute = 'AXHorizontalScrollBar' if target.command.startswith(('scroll_left', 'scroll_right')) else 'AXVerticalScrollBar'
@@ -487,7 +498,7 @@ class NativeInteractions:
         if target.command in {'undo', 'redo'}:
             return bool(same and current.value != original.value)
         if target.command == 'close_tab':
-            application = self.text.ax.AXUIElementCreateApplication(target.pid)
+            application = self.text.application(target.pid)
             windows = self.text.read(application, 'AXWindows')
             if windows is not None and all(not self.text.equal(window, target.window) for window in windows):
                 return True
@@ -528,7 +539,7 @@ class NativeInteractions:
                         ratios = [new / previous for new, previous in zip(current_sample[2], size)]
                         if math.isclose(*ratios, rel_tol=0.05) and (min(ratios) > 1 if target.command == 'zoom_in' else max(ratios) < 1 if target.command == 'zoom_out' else False):
                             return True
-        application = self.text.ax.AXUIElementCreateApplication(target.pid)
+        application = self.text.application(target.pid)
         window, focus = self.text.read(application, 'AXFocusedWindow'), self.text.read(application, 'AXFocusedUIElement')
         if target.command in BROWSER_COMMANDS - {'address_bar'} | {'select_tab'}:
             return False

@@ -81,8 +81,10 @@ def verify_action(desktop: object, action: ActionCandidate, before: object, time
             return True
         if state.active and state.active.bundle_id == expected_bundle:
             if action.kind in {"OPEN_APP", "FOCUS_APP"}:
-                # Both preparation paths need an AX window, not just a frontmost app.
-                if state.focused_window_available or not (action.parameters.get("continue_typing") or action.parameters.get("continue_workflow")):
+                finder_ready = (expected_bundle == 'com.apple.finder' and action.parameters.get('continue_workflow')
+                                and any(item.kind == 'find' for item in state.workflow_targets))
+                # Finder's observed Find menu can prepare search without an existing window.
+                if state.focused_window_available or finder_ready or not (action.parameters.get("continue_typing") or action.parameters.get("continue_workflow")):
                     details["reason"] = "app_ready"
                     return True
             elif action.kind == "CREATE_NOTE":

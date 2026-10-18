@@ -138,7 +138,7 @@ class NativeWorkflows:
                 if resolved and text.settable(node, "AXSelected") and available:
                     kind, (url, identity) = "item", resolved
                     label = label or Path(unquote(urlparse(url).path)).name[:240]
-            if kind:
+            if kind and (window is not None or bundle == FINDER and kind == 'find'):
                 old = next((item for item in self.previous if item.pid == pid and text.equal(item.element, node)), None)
                 identifier = old.id if old else f"workflow_{self.next_id}"
                 if not old:
@@ -176,8 +176,9 @@ class NativeWorkflows:
     def same_target(self, original, current):
         """Reject changed controls, windows, query baselines, selection or file identity."""
 
-        return (original == current and self.text.equal(original.element, current.element)
-                and self.text.equal(original.window, current.window))
+        same_window = (original.window is current.window if original.window is None or current.window is None
+                       else self.text.equal(original.window, current.window))
+        return original == current and self.text.equal(original.element, current.element) and same_window
 
     def execute(self, action, state, guard):
         """Send one prevalidated AX operation; uncertain effects never get a fallback."""
@@ -197,7 +198,7 @@ class NativeWorkflows:
             if error:
                 raise TextInputError('Finder search could not receive focus.', effect_sent=True)
             error = ax.AXUIElementSetAttributeValue(target.element, "AXValue", action.parameters["text"])
-            application = ax.AXUIElementCreateApplication(target.pid)
+            application = self.text.application(target.pid)
             if error or not guard() or not self.text.equal(self.text.read(application, 'AXFocusedWindow'), target.window) or not self.text.equal(self.text.read(application, 'AXFocusedUIElement'), target.element) or self.text.read(target.element, 'AXValue') != action.parameters['text']:
                 raise TextInputError('Finder search changed before submission; Return was not sent.', effect_sent=True)
             for event in events:

@@ -138,6 +138,33 @@ class NativeText:
         error, value = self.ax.AXUIElementCopyAttributeValue(element, name, None)
         return value if error == 0 else None
 
+    def application(self, pid: int):
+        """Recover an invalid app handle only through the same system-focused process."""
+
+        ax = self.ax
+        application = ax.AXUIElementCreateApplication(pid)
+        ax.AXUIElementSetMessagingTimeout(application, 0.2)
+        error, _ = ax.AXUIElementCopyAttributeValue(application, 'AXRole', None)
+        self.application_resolution = {'source': 'pid', 'role_ax_error': int(error)}
+        if error == 0:
+            error, _ = ax.AXUIElementCopyAttributeValue(application, 'AXFocusedWindow', None)
+            self.application_resolution['focused_window_ax_error'] = int(error)
+        if error != AX.kAXErrorInvalidUIElement or not ax.AXIsProcessTrusted() or not all(
+                hasattr(ax, name) for name in ('AXUIElementCreateSystemWide', 'AXUIElementGetPid')):
+            return application
+        system = ax.AXUIElementCreateSystemWide()
+        ax.AXUIElementSetMessagingTimeout(system, 0.2)
+        focus_error, focused = ax.AXUIElementCopyAttributeValue(system, 'AXFocusedApplication', None)
+        self.application_resolution['focused_application_ax_error'] = int(focus_error)
+        if focus_error == 0 and focused is not None:
+            pid_error, focused_pid = ax.AXUIElementGetPid(focused, None)
+            self.application_resolution['focused_pid_ax_error'] = int(pid_error)
+            if pid_error == 0 and focused_pid == pid and self.read(focused, 'AXRole') == 'AXApplication':
+                ax.AXUIElementSetMessagingTimeout(focused, 0.2)
+                self.application_resolution['source'] = 'system_focused_pid_verified'
+                return focused
+        return application
+
     def settable(self, element: object, name: str) -> bool:
         """Check native write support before offering a focus or text operation."""
 

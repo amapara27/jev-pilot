@@ -8,6 +8,7 @@ import re
 from time import monotonic
 
 from AppKit import NSWorkspace, NSWorkspaceOpenConfiguration
+from ApplicationServices import kAXErrorNoValue
 from Foundation import NSDate, NSRunLoop, NSBundle, NSURL
 
 from .models import ActionCandidate
@@ -18,7 +19,7 @@ from .workflows import NativeWorkflows, WorkflowTarget, WORKFLOW_KINDS, file_ide
 from .verification import selected_notes
 from .app_catalog import APP_ALIASES, APPLICATION_ROOTS, discover_applications
 from .web_navigation import BROWSER_BUNDLES, SEARCH_SITES, WEB_OPERATIONS, browser_url, normalize_web_url
-from .interactions import NativeInteractions, InteractionTarget, WINDOW_COMMANDS
+from .interactions import NativeInteractions, InteractionTarget, WINDOW_COMMANDS, TEXT_COMMANDS
 
 
 @dataclass(frozen=True)
@@ -123,9 +124,9 @@ class MacDesktop:
         diagnostics = {}
         workflow_targets, document_url, current_browser_url = (), None, None
         if trusted:
-            application = ax.AXUIElementCreateApplication(active.pid)
-            ax.AXUIElementSetMessagingTimeout(application, 0.2)
+            application = self.text.application(active.pid)
             error, window = ax.AXUIElementCopyAttributeValue(application, "AXFocusedWindow", None)
+            diagnostics['application_resolution'] = dict(self.text.application_resolution)
             diagnostics["focused_window_ax_error"] = int(error)
             if error != 0:
                 window = None
@@ -140,6 +141,12 @@ class MacDesktop:
                 document_url = resolved[0] if resolved else None
                 if active.bundle_id in BROWSER_BUNDLES or active.bundle_id == self.default_browser():
                     current_browser_url = browser_url(self.text, window)
+            elif active.bundle_id == 'com.apple.finder' and error in {0, kAXErrorNoValue}:
+                # Finder can be frontmost on the desktop with no window; its Find menu still exists.
+                self.text.diagnostics = {}
+                workflow_targets = self.workflows.scan(active.pid, active.bundle_id, application, None)
+                diagnostics.update(self.text.diagnostics)
+                diagnostics['workflow_discovery'] = dict(self.workflows.diagnostics)
         state = DesktopState(active, running, trusted, focused, fields, diagnostics, workflow_targets, document_url, current_browser_url)
         if trusted and focused and getattr(self, 'interaction_commands', ()):
             interactions = self.interactions.scan(state, application, window, self.interaction_commands)
@@ -283,8 +290,11 @@ class MacDesktop:
                 return {'mode':'workflow', 'bundle':matches[0],
                         'operations':['FOCUS_APP_FOR_WORKFLOW', 'KEYBOARD_ACTION', 'STOP', 'UNSUPPORTED']}
         if getattr(self, 'interaction_commands', ()) and state.active and 'TYPE_TEXT' not in required:
+            operations = ['KEYBOARD_ACTION', 'SCROLL', 'STOP', 'UNSUPPORTED']
+            if set(self.interaction_commands) & TEXT_COMMANDS:
+                operations.append('FOCUS_FIELD')
             return {'mode':'interaction', 'bundle':state.active.bundle_id,
-                    'operations':['KEYBOARD_ACTION', 'SCROLL', 'FOCUS_FIELD', 'STOP', 'UNSUPPORTED']}
+                    'operations':operations}
         if re.search(r'\b(?:close|quit)\s+.+', masked, re.I) or re.search(r'\bnew\s+terminal\s+window\b', masked, re.I):
             return {'mode':'unsupported', 'bundle':None, 'operations':['STOP', 'UNSUPPORTED']}
         return {}
@@ -344,7 +354,7 @@ class MacDesktop:
                 frontmost = self.workspace.frontmostApplication()
                 if frontmost is None or int(frontmost.processIdentifier()) != target.pid:
                     return False
-                application = self.text.ax.AXUIElementCreateApplication(target.pid)
+                application = self.text.application(target.pid)
                 return (self.text.equal(self.text.read(application, 'AXFocusedWindow'), target.window)
                         and (not target.focus_sensitive or self.text.equal(self.text.read(application, 'AXFocusedUIElement'), target.focused)))
 
@@ -360,9 +370,14 @@ class MacDesktop:
 
             def guard():
                 frontmost = self.workspace.frontmostApplication()
-                application = self.text.ax.AXUIElementCreateApplication(fresh.active.pid)
-                return (frontmost is not None and int(frontmost.processIdentifier()) == fresh.active.pid
-                        and self.text.equal(self.text.read(application, 'AXFocusedWindow'), target.window))
+                application = self.text.application(fresh.active.pid)
+                error, window = self.text.ax.AXUIElementCopyAttributeValue(application, 'AXFocusedWindow', None)
+                if frontmost is None or int(frontmost.processIdentifier()) != fresh.active.pid or not self.text.ax.AXIsProcessTrusted():
+                    return False
+                if target.window is None:
+                    return (action.kind == 'PREPARE_SEARCH' and target.bundle_id == 'com.apple.finder' and target.kind == 'find'
+                            and error in {0, kAXErrorNoValue} and window is None)
+                return error == 0 and window is not None and self.text.equal(window, target.window)
 
             self.workflows.execute(action, fresh, guard)
             return
@@ -379,7 +394,7 @@ class MacDesktop:
                     return False
                 if action.kind == "FOCUS_FIELD":
                     return True
-                application = self.text.ax.AXUIElementCreateApplication(target.pid)
+                application = self.text.application(target.pid)
                 focused = self.text.read(application, "AXFocusedUIElement")
                 return focused is not None and bool(self.text.equal(focused, target.element))
 

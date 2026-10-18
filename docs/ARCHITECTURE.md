@@ -186,7 +186,11 @@ python_executable and permission instructions. Plain app activation still works
 without AX permission. Microphone permission alone does not authorize AX effects.
 
 Both continue_typing and continue_workflow activation must observe the selected
-foreground app and a usable focused Accessibility window. Verification polls
+foreground app and a usable focused Accessibility window, except Finder search
+preparation may use an observed enabled Find menu when AXFocusedWindow is absent
+with success or AXNoValue. Only PREPARE_SEARCH can execute in this windowless state;
+recheck foreground PID, trust and absent window before pressing Find, then require
+a real writable query. Never compare nil native handles with CFEqual. Verification polls
 within its existing three-second bound, returning immediately when ready. Persistent
 AX window errors stop preparation before the next provider request, with a specific
 readiness reason; the already-sent activation is not replayed. App-only activation
@@ -430,3 +434,19 @@ When a verified created note's focused body lacks readable text/caret, runtime o
 The user's maximize preference is full screen. Minimize/fullscreen use readable writable AXMinimized/AXFullScreen on one observed window and verify that original window's resulting state through AXWindows. Named commands may focus a running exact app before the window effect; they cannot target another app's window or launch an unrequested app. Native window attributes are permitted in Terminal/iTerm while keyboard/menu input and submission remain blocked. Ordered explicit window tails follow one verified insertion; quoted command words remain literal.
 
 Reports add bounded value error/type/source, ancestry failure roles, workflow/query discovery and interaction/window capability checks. Document/clipboard text and native handles remain local. Pasteboard text is captured only for explicitly requested paste. Tests write native-*-e2e.json and opt-in live-native-discovery-e2e.json with synthetic native services; tool-host AX trust remains false, so actual application acceptance remains unverified.
+
+NativeText.application is shared by discovery, dispatch guards and verification.
+If a PID-created application's role or focused-window read reports InvalidUIElement,
+it may use the system-focused application only after AXUIElementGetPid matches the
+requested PID and AXRole is AXApplication. Trust and foreground guards still apply;
+other errors do not authorize recovery. Bounded application_resolution diagnostics
+record source and AX error codes without native handles. No private AX flags are set.
+
+Finder standard AXScrollBar positions use normalized 0–1 only when both min/max
+attributes are unsupported, as with Safari; other errors and invalid values still
+reject the target. Bounded scrollbar_checks report attribute errors, value type,
+range source and write capability without values. Nontext interaction goals cannot
+offer FOCUS_FIELD. Missing scroll areas/ranges remain unsupported; movement and
+boundary verification are unchanged. Native-control E2E artifacts replay invalid
+application references, windowless Finder search, normalized bars and unavailable
+scroll targets through the production runtime with synthetic native effects.
