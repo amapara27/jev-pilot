@@ -117,26 +117,28 @@ class InputActionsEndToEnd(unittest.TestCase):
         ax.kAXValueCGSizeType = 2
         quartz = InteractionQuartz(ax)
         desktop.text.quartz = quartz
+        # Scrolling sets the scrollbar position from measured geometry; wheel events are never posted.
         quartz.bar = Node(AXRole='AXScrollBar', AXValue=0.2, AXMinValue=0, AXMaxValue=1)
-        area = Node(AXRole='AXScrollArea', AXParent=ax.window, AXVerticalScrollBar=quartz.bar,
+        quartz.bar.writable.add('AXValue')
+        ax.AXUIElementSetAttributeValue = lambda node, attribute, value: (node.attrs.update({attribute: value}) or 0)
+        content = Node(AXRole='AXGroup', AXSize=(400, 1500))
+        area = Node(AXRole='AXScrollArea', AXParent=ax.window, AXVerticalScrollBar=quartz.bar, AXContents=[content],
                     AXPosition=(10, 20), AXSize=(400, 300), AXChildren=[ax.editor])
         ax.window.attrs['AXChildren'] = [area]
         ax.editor.attrs['AXParent'] = area
         result = run_goal('scroll down a lot', desktop, client=InteractionJev(plan=[('SCROLL', 'action:scroll_down_large', 'none')]))
         self.assertEqual(result['outcome'], 'completed', result)
-        self.assertGreater(quartz.bar.attrs['AXValue'], 0.2)
-        self.assertEqual(len(quartz.events), 1)
-        self.assertEqual(quartz.events[0]['point'], (210, 170))
+        # 600 px over a 1200 px scrollable extent moves half the 0–1 range.
+        self.assertAlmostEqual(quartz.bar.attrs['AXValue'], 0.7)
+        self.assertEqual(quartz.events, [])
         quartz.bar.attrs['AXValue'] = 1
         result = run_goal('scroll down', desktop, client=InteractionJev(plan=[('SCROLL', 'action:scroll_down', 'none')]))
         self.assertFalse(result['effect_sent'], result)
         quartz.bar.attrs['AXValue'] = 0.5
-        quartz.bar.writable.add('AXValue')
-        ax.AXUIElementSetAttributeValue = lambda node, attribute, value: (node.attrs.update({attribute: value}) or 0)
         result = run_goal('go to the top', desktop, client=InteractionJev(plan=[('SCROLL', 'action:scroll_top', 'none')]))
         self.assertEqual(result['outcome'], 'completed', result)
         self.assertEqual(quartz.bar.attrs['AXValue'], 0)
-        self.assertEqual(len(quartz.events), 1)
+        self.assertEqual(quartz.events, [])
         Path('.build/scroll-e2e.json').write_text(json.dumps(result, indent=2))
 
     def test_input_failure_boundaries_and_exact_enter_context(self):
@@ -186,13 +188,13 @@ class InputActionsEndToEnd(unittest.TestCase):
     def test_yes_skips_routine_workflow_prompts_in_text_and_voice(self):
         """Automatic routine controls still stop for unknown or destructive controls."""
 
-        from test_workflow_e2e import setup as workflow_setup
+        from test_workflow_e2e import panel_button, setup as workflow_setup
         records = {}
         for voice in (False, True):
             for label, expected in [('New Document', 'completed'), ('Perform Unknown Task', 'rejected'),
                                     ('Delete Document', 'blocked')]:
                 desktop, ax = workflow_setup('com.apple.TextEdit')
-                ax.control.attrs['AXTitle'] = label
+                panel_button(ax, label)
 
                 def press(node, action):
                     ax.effects.append(('press', label))

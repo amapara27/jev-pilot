@@ -104,10 +104,19 @@ class MacDesktop:
         bundle = NSBundle.bundleWithURL_(url) if url is not None else None
         return str(bundle.bundleIdentifier()) if bundle and bundle.bundleIdentifier() else None
 
+    def frontmost(self):
+        """Read the frontmost app after a zero-wait main run-loop pass.
+
+        NSWorkspace refreshes frontmostApplication only when the run loop runs; this CLI otherwise
+        pumps it only during its own activations, so app switches between goals went unseen."""
+
+        NSRunLoop.currentRunLoop().runUntilDate_(NSDate.date())
+        return self.workspace.frontmostApplication()
+
     def snapshot(self) -> DesktopState:
         """Observe native app/window facts and bounded, locally retained AX editors."""
 
-        frontmost = self.workspace.frontmostApplication()
+        frontmost = self.frontmost()
         if frontmost is None:
             raise DesktopError("No frontmost application is available.")
         active = self._app(frontmost)
@@ -351,7 +360,7 @@ class MacDesktop:
             target = next(item for item in fresh.interaction_targets if item.id == action.parameters['element_id'])
 
             def guard():
-                frontmost = self.workspace.frontmostApplication()
+                frontmost = self.frontmost()
                 if frontmost is None or int(frontmost.processIdentifier()) != target.pid:
                     return False
                 application = self.text.application(target.pid)
@@ -369,7 +378,7 @@ class MacDesktop:
             target = next(item for item in fresh.workflow_targets if item.id == action.parameters['element_id'])
 
             def guard():
-                frontmost = self.workspace.frontmostApplication()
+                frontmost = self.frontmost()
                 application = self.text.application(fresh.active.pid)
                 error, window = self.text.ax.AXUIElementCopyAttributeValue(application, 'AXFocusedWindow', None)
                 if frontmost is None or int(frontmost.processIdentifier()) != fresh.active.pid or not self.text.ax.AXIsProcessTrusted():
@@ -389,7 +398,7 @@ class MacDesktop:
             def guard() -> bool:
                 """Recheck PID/focus without copying existing document text per event."""
 
-                frontmost = self.workspace.frontmostApplication()
+                frontmost = self.frontmost()
                 if frontmost is None or int(frontmost.processIdentifier()) != target.pid:
                     return False
                 if action.kind == "FOCUS_FIELD":

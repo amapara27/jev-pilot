@@ -74,6 +74,14 @@ def setup(bundle, url=None):
     return desktop, ax
 
 
+def panel_button(ax, title):
+    """Model a window button (like TextEdit's open-panel New Document); menu items are never generic controls."""
+
+    ax.control.attrs.update(AXRole="AXButton", AXTitle=title)
+    ax.application.attrs["AXMenuBar"].attrs["AXChildren"].remove(ax.control)
+    ax.window.attrs["AXChildren"].append(ax.control)
+
+
 class WorkflowEndToEnd(unittest.TestCase):
     """Verify exact effects, missing capabilities, duplicate identity and stale targets."""
 
@@ -367,7 +375,7 @@ class WorkflowEndToEnd(unittest.TestCase):
         for bundle in ("com.apple.TextEdit", "com.example.Editor"):
             for mode in ("new_document", "no_change", "dangerous", "unknown_rejected", "window_drift", "repeat"):
                 desktop, ax = setup(bundle)
-                ax.control.attrs["AXTitle"] = {"dangerous": "Delete Document", "unknown_rejected": "Perform Unknown Task"}.get(mode, "New Document")
+                panel_button(ax, {"dangerous": "Delete Document", "unknown_rejected": "Perform Unknown Task"}.get(mode, "New Document"))
                 original_press = ax.AXUIElementPerformAction
                 def press(node, action):
                     result = original_press(node, action)

@@ -59,7 +59,7 @@ def _save_report(path: Path, report: dict[str, object]) -> None:
 def _confirm_action(desktop, prompt, *, cancel_event=None):
     """Allow voice cancellation while waiting, then restore the exact approved process."""
 
-    original = desktop.workspace.frontmostApplication()
+    original = desktop.frontmost()
     if not original:
         return False
     pid = int(original.processIdentifier())
@@ -75,7 +75,7 @@ def _confirm_action(desktop, prompt, *, cancel_event=None):
             return False
     if (cancel_event is not None and cancel_event.is_set()) or answer.strip().casefold() != 'y':
         return False
-    current = desktop.workspace.frontmostApplication()
+    current = desktop.frontmost()
     if current and int(current.processIdentifier()) == pid:
         return True
     if not original.activateWithOptions_(NSApplicationActivateIgnoringOtherApps):
@@ -84,7 +84,7 @@ def _confirm_action(desktop, prompt, *, cancel_event=None):
     while monotonic() < deadline:
         if cancel_event is not None and cancel_event.is_set():
             return False
-        current = desktop.workspace.frontmostApplication()
+        current = desktop.frontmost()
         if current and int(current.processIdentifier()) == pid:
             return True
         NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.05))

@@ -1,4 +1,4 @@
-"""Ground explicit keyboard commands and wheel events in current native context."""
+"""Ground explicit keyboard commands and scrollbar positions in current native context."""
 
 from collections import deque
 from dataclasses import dataclass, field
@@ -106,7 +106,7 @@ class InteractionTarget:
     value: float | None = None
     minimum: float = 0
     maximum: float = 1
-    point: tuple | None = None
+    extent: float | None = None  # scrollable pixels along the bar's axis (content minus viewport)
     clipboard_count: int | None = None
     menu_label: str = ''
     field_id: str | None = None
@@ -189,6 +189,10 @@ class NativeInteractions:
                 for tab in list(text.read(node, 'AXTabs') or text.read(node, 'AXChildren') or ())[:64]:
                     if text.read(tab, 'AXRole') in {'AXRadioButton', 'AXTab'} or text.read(tab, 'AXSubrole') == 'AXTabButton':
                         tabs.append((tab, native_true(text.read(tab, 'AXSelected')) or native_true(text.read(tab, 'AXValue'))))
+            # Newer Safari lists its tab buttons in a tab-bar group beside an empty AXTabGroup.
+            if (not in_webpage and role in {'AXRadioButton', 'AXTab'} and text.read(node, 'AXSubrole') == 'AXTabButton'
+                    and len(tabs) < 64 and not any(text.equal(node, tab) for tab, _ in tabs)):
+                tabs.append((node, native_true(text.read(node, 'AXSelected')) or native_true(text.read(node, 'AXValue'))))
             label = str(text.read(node, 'AXTitle') or text.read(node, 'AXDescription') or '')[:240].casefold().strip()
             if role == 'AXMenuBarItem' and label not in branches:
                 continue
@@ -310,9 +314,11 @@ class NativeInteractions:
             if not position or not size or size[0] <= 0 or size[1] <= 0:
                 self.diagnostics['scroll_geometry_unavailable'] = self.diagnostics.get('scroll_geometry_unavailable', 0) + 1
                 continue
-            point = (position[0] + size[0] / 2, position[1] + size[1] / 2)
             label = str(text.read(area, 'AXDescription') or text.read(area, 'AXTitle') or 'Scrollable area')[:240]
-            for attribute, directions in [('AXVerticalScrollBar', ('up', 'down')), ('AXHorizontalScrollBar', ('left', 'right'))]:
+            contents = list(text.read(area, 'AXContents') or ())
+            content = self.geometry(contents[0], 'AXSize', ax.kAXValueCGSizeType) if len(contents) == 1 else None
+            # axis indexes (width, height): a vertical bar scrolls through content height.
+            for axis, attribute, directions in [(1, 'AXVerticalScrollBar', ('up', 'down')), (0, 'AXHorizontalScrollBar', ('left', 'right'))]:
                 bar = self.scrollbar(area, attribute)
                 check = {'axis': directions[0], 'bar_present': bar is not None}
                 self.diagnostics['scrollbar_checks'].append(check)
@@ -323,25 +329,30 @@ class NativeInteractions:
                     continue
                 reads = [ax.AXUIElementCopyAttributeValue(bar, key, None) for key in ('AXValue', 'AXMinValue', 'AXMaxValue')]
                 value, minimum, maximum = (item if error == 0 else None for error, item in reads)
-                missing_range = all(error == -25205 for error, _ in reads[1:])
+                # WebKit reports min/max as unsupported or, on newer macOS, as 0/0 beside a 0–1 value.
+                missing_range = (all(error == -25205 for error, _ in reads[1:])
+                                 or all(error == 0 and item == 0 and not isinstance(item, bool) for error, item in reads[1:]))
                 normalized = missing_range and state.active.bundle_id in {'com.apple.Safari', 'com.apple.finder'} and text.read(bar, 'AXRole') == 'AXScrollBar'
                 if normalized:
                     # Standard WebKit/AppKit scrollers expose a normalized position without min/max.
                     minimum, maximum = 0, 1
                 valid = all(isinstance(v, (float, int)) and not isinstance(v, bool) and math.isfinite(v) for v in (value, minimum, maximum)) and minimum <= value <= maximum and minimum != maximum
                 writable = text.settable(bar, 'AXValue')
+                # A pixel step needs the measured scrollable distance; without it only top/bottom remain.
+                extent = content[axis] - size[axis] if content else None
+                extent = extent if extent and extent > 0 else None
                 check.update(value_ax_error=int(reads[0][0]), min_ax_error=int(reads[1][0]), max_ax_error=int(reads[2][0]),
                              value_type=type(value).__name__[:64], range_source='normalized' if normalized else 'native',
-                             valid_range=bool(valid), position_writable=writable)
-                if not valid:
+                             valid_range=bool(valid), position_writable=writable, content_extent_available=extent is not None)
+                if not valid or not writable:
                     continue
                 for direction, available in zip(directions, (value > minimum, value < maximum)):
                     if available:
-                        for suffix in ('', '_small', '_large'):
-                            add('scroll_' + direction + suffix, area, bar=bar, value=value, minimum=minimum, maximum=maximum, point=point, area_label=label)
+                        if extent is not None:
+                            for suffix in ('', '_small', '_large'):
+                                add('scroll_' + direction + suffix, area, bar=bar, value=value, minimum=minimum, maximum=maximum, extent=extent, area_label=label)
                         if direction in {'up', 'down'}:
-                            if writable:
-                                add('scroll_top' if direction == 'up' else 'scroll_bottom', area, bar=bar, value=value, minimum=minimum, maximum=maximum, point=point, area_label=label)
+                            add('scroll_top' if direction == 'up' else 'scroll_bottom', area, bar=bar, value=value, minimum=minimum, maximum=maximum, extent=extent, area_label=label)
         self.previous = tuple(candidates)
         return self.previous
 
@@ -414,30 +425,24 @@ class NativeInteractions:
             if error != 0:
                 raise TextInputError('The text selection setter failed; it was not retried.', effect_sent=True)
             return
-        if command in {'scroll_top', 'scroll_bottom'}:
+        if command.startswith('scroll_'):
+            if command in {'scroll_top', 'scroll_bottom'}:
+                position = target.minimum if command == 'scroll_top' else target.maximum
+            else:
+                # PID-posted wheel events no longer reach AppKit/WebKit views, and routed ones move the
+                # user's pointer, so convert the pixel step through measured geometry into a bar position.
+                pixels = 600 if command.endswith('_large') else 60 if command.endswith('_small') else 200
+                step = pixels / target.extent * (target.maximum - target.minimum)
+                backwards = command.startswith(('scroll_up', 'scroll_left'))
+                position = min(target.maximum, max(target.minimum, target.value - step if backwards else target.value + step))
             if not guard():
                 raise TextInputError('The foreground or focus changed before scrolling.')
-            error = self.text.ax.AXUIElementSetAttributeValue(target.bar, 'AXValue', target.minimum if command == 'scroll_top' else target.maximum)
+            error = self.text.ax.AXUIElementSetAttributeValue(target.bar, 'AXValue', position)
             if error != 0:
                 raise TextInputError('The scroll position setter failed; it was not retried.', effect_sent=True)
             return
         if not q.CGPreflightPostEventAccess():
             raise TextInputError('macOS denied event-posting permission.')
-        if command.startswith('scroll_'):
-            # Pixel units keep larger gestures within the documented event semantics.
-            amount = 600 if command.endswith('_large') else 60 if command.endswith('_small') else 200
-            backwards = command.startswith(('scroll_up', 'scroll_left')) or command == 'scroll_top'
-            amount *= 1 if backwards else -1
-            horizontal = command.startswith(('scroll_left', 'scroll_right'))
-            event = q.CGEventCreateScrollWheelEvent(None, q.kCGScrollEventUnitPixel, 2, 0 if horizontal else amount, amount if horizontal else 0)
-            if event is None:
-                raise TextInputError('macOS could not create a scroll event.')
-            q.CGEventSetLocation(event, target.point)
-            q.CGEventSetFlags(event, 0)
-            if not guard():
-                raise TextInputError('The foreground or focus changed before scrolling.')
-            q.CGEventPostToPid(target.pid, event)
-            return
         code, flags = {'enter': (36, 0), 'tab': (48, 0), 'shift_tab': (48, kCGEventFlagMaskShift), 'escape': (53, 0)}[command]
         events = [q.CGEventCreateKeyboardEvent(None, code, down) for down in (True, False)]
         if any(event is None for event in events):

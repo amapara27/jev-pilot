@@ -11,6 +11,8 @@ from .text_input import TextInputError, native_true, COLLECTION_ROLES
 
 NOTES = "com.apple.Notes"
 FINDER = "com.apple.finder"
+# Only menus that hold scoped workflow commands are opened (Notes New Note, Finder Open and Search).
+WORKFLOW_MENUS = {NOTES: {"file"}, FINDER: {"file", "edit"}}
 WORKFLOW_KINDS = {"CREATE_NOTE", "PREPARE_SEARCH", "SEARCH", "SELECT_ITEM", "OPEN_ITEM", "PRESS_CONTROL"}
 
 
@@ -103,7 +105,7 @@ class NativeWorkflows:
                 continue
             role = text.read(node, "AXRole")
             label = next((str(value) for value in (text.read(node, "AXTitle"), text.read(node, "AXDescription")) if isinstance(value, str) and value), "")[:240]
-            if bundle == FINDER and role == 'AXMenuBarItem' and label.casefold() != 'file':
+            if role == 'AXMenuBarItem' and label.casefold() not in WORKFLOW_MENUS.get(bundle, ()):
                 continue
             enabled_error, enabled = ax.AXUIElementCopyAttributeValue(node, "AXEnabled", None)
             error, actions = ax.AXUIElementCopyActionNames(node, None)
@@ -117,11 +119,14 @@ class NativeWorkflows:
             if bundle == NOTES and role == "AXRow" and (native_true(text.read(node, "AXSelected")) or any(text.equal(node, row) for row in selected_notes)):
                 kind, label = "note_selection", "Selected note"
             if available and press and role in {"AXMenuItem", "AXButton"}:
-                if label and not text.read(node, "AXURL") and not text.read(node, "AXFilename"):
+                # Menu items are never generic controls: their labels carry history, bookmark and file
+                # titles, and a full menu tree floods Jev's request (152 TextEdit items).
+                if role == "AXButton" and label and not text.read(node, "AXURL") and not text.read(node, "AXFilename"):
                     kind = "control"
                 if bundle == NOTES and label.casefold() == "new note":
                     kind = "new_note"
-                elif bundle == FINDER and label.casefold() in {"find", "find…", "find..."}:
+                elif bundle == FINDER and label.casefold() in {"find", "find…", "find...", "search"}:
+                    # Newer Finder moved File > Find (⌘F) to Edit > Search.
                     kind = "find"
                 elif bundle == FINDER and label.casefold() == "open":
                     kind = "open"
@@ -151,7 +156,8 @@ class NativeWorkflows:
             # Document text and paragraph children never contribute workflow candidates.
             if role in {"AXTextArea", "AXTextField"}:
                 continue
-            children = text.read(node, "AXVisibleChildren")
+            # Closed menus report no visible children, so only collections/scroll areas prefer them (as in text_input).
+            children = text.read(node, "AXVisibleChildren") if role in COLLECTION_ROLES or role == "AXScrollArea" else None
             if children is None:
                 children = text.read(node, "AXChildren")
             pending = list(children or ())[:max(0, 256 - len(queue) - len(deferred))]

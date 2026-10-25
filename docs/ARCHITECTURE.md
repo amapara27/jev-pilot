@@ -29,7 +29,7 @@ voice: microphone callback → bounded ordered PCM queue → Nemotron streaming 
 | `app/web_navigation.py` | HTTP URL normalization, search encoding and bounded browser URL observation/matching. |
 | `app/text_input.py` | Bounded AX editor discovery, identity continuity, local document/caret facts, UTF-16 replacement, guarded text/focus dispatch. |
 | `app/workflows.py` | Bounded Notes/Finder controls, local file identity, guarded menu/query/selection effects. |
-| `app/interactions.py` | Explicit command order, focused editor/enabled menu/scroll-range grounding, guarded keys/wheel/AX effects and local outcome evidence. |
+| `app/interactions.py` | Explicit command order, focused editor/enabled menu/scroll-range grounding, guarded keys/scrollbar/AX effects and local outcome evidence. |
 | `app/semantics.py` | Operation vocabulary, exact goal spans, combination checks, local action resolution. |
 | `app/decision.py` | One TypeSafe call with operation, payload and speculative per-operation targets; validate only the chosen head. |
 | `app/models.py` | Executable actions and validated semantic decisions. |
@@ -41,7 +41,7 @@ voice: microphone callback → bounded ordered PCM queue → Nemotron streaming 
 
 ## Packaging and installed paths
 
-`pyproject.toml` defines distribution `jvpilot` version `0.1.0` with Python >=3.12,
+`pyproject.toml` defines distribution `jvpilot` version `0.2.0` with Python >=3.12,
 the setuptools build backend and console entry point `app.cli:main`. Only the `app`
 package enters the wheel; dependencies come from `requirements.txt` through
 setuptools dynamic metadata. Conda development and `python -m app` remain supported.
@@ -61,9 +61,11 @@ It reuses conda dependencies and does not prove a clean uv install or native acc
 
 `.github/workflows/ci.yml` runs on pushes and pull requests to `main`, or manually,
 using an Apple Silicon `macos-15` runner and uv/Python 3.12. It installs the project
-and test/build tools into `.venv`, runs offline tests and compilation checks, then
-builds distributions. It needs no API credentials or speech model download;
-native microphone and desktop acceptance remain separate. A required `test` check
+and test tools into `.venv`, runs a small offline E2E suite (`tests/`: fake apps,
+microphone and Jev) and compilation checks, then builds distributions. It needs no
+API credentials or speech model download. Real-app behavior is tested locally by
+`scripts/native_matrix.py`; `tests/test_matrix_routing_e2e.py` keeps every matrix
+goal's routing and approval rules checked in CI. A required `test` check
 must be configured in GitHub branch rules; the publishing workflow does not wait
 for CI automatically.
 
@@ -99,11 +101,14 @@ Enter/Tab/Shift-Tab/Escape use paired PID-directed Quartz events. Enter never ex
 permission preflight and a final PID/window/focus guard precede event dispatch.
 Notes selection identity is rechecked independently of editor identity.
 
-Directional scrolling uses one pixel-unit wheel event positioned within an
-observed area with readable remaining range. Top/bottom use writable AX scrollbar
-positions. Range, bounds, native scrollbar/window/focus and editor context are
+Directional scrolling sets the observed area's writable AX scrollbar to its current
+position plus a 60/200/600-pixel step, converted through the measured scrollable
+distance (single AXContents size minus the area's size); areas without that geometry
+offer only top/bottom. PID-posted wheel events no longer reach AppKit/WebKit views
+(2026-10-25 native matrix), and routed ones move the user's pointer. Top/bottom set
+the scrollbar's minimum/maximum. Range, bounds, native scrollbar/window/focus and editor context are
 freshly validated. Verification requires movement in the requested direction
-or exact boundary position; no event replay. Safari standard WebKit AXScrollBar values use the documented normalized 0–1 range when both min/max attributes are unsupported. Unique axis-labelled child scrollbars are accepted. Paste reads bounded plain text only locally, checking stable changeCount before/after capture and before dispatch; neither clipboard contents nor native handles enter Jev state or reports. Copy/cut use changeCount plus unchanged/exactly cut editor evidence. TextEdit/Notes
+or exact boundary position; no event replay. Safari/Finder standard AXScrollBar values use the normalized 0–1 range when min/max are both unsupported or both reported as 0. Unique axis-labelled child scrollbars are accepted. Paste reads bounded plain text only locally, checking stable changeCount before/after capture and before dispatch; neither clipboard contents nor native handles enter Jev state or reports. Copy/cut use changeCount plus unchanged/exactly cut editor evidence. TextEdit/Notes
 Enter verifies exact newline/caret; selection verifies the complete UTF-16 range.
 Paste verifies exact expected insertion and UTF-16 caret; undo/redo require changed editor values. Safari tab selection and closure require same-window native selection/count evidence or confirmed removal of the original window from AXWindows. Next/previous tab requires the adjacent selected tab in the same native tab order, including wraparound; a single unchanged tab cannot prove switching. Lost Accessibility permission/window evidence cannot prove closure. Zoom percentages must change in the requested direction on the same page/tab; reset availability can prove reset-to-default only, with proportional same-element geometry as the other zoom evidence. A successful selection can withdraw its action target, so verification uses another observation of the same native window. Tab creation/reopening needs count growth, history navigation needs a URL change, and reload needs busy/page identity evidence. Focus changes alone never prove these browser actions. Address-bar/find/key focus actions retain their specific focus evidence. Unobservable effects stay
 unverified even if the event was sent.

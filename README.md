@@ -1,7 +1,7 @@
 # Jev Pilot
 
 <p align="center">
-  <img src="docs/assets/jev-pilot.webp" alt="Jev Pilot logo with a voice waveform and cursor inside a terminal window" width="720">
+  <img src="https://raw.githubusercontent.com/amapara27/jev-pilot/main/docs/assets/jev-pilot.webp" alt="Jev Pilot logo with a voice waveform and cursor inside a terminal window" width="720">
 </p>
 
 Control your Mac with spoken commands. Jev Pilot listens through your microphone, transcribes speech locally, asks Jev to choose a grounded action, and checks the result before continuing.
@@ -14,10 +14,14 @@ This early macOS command-line release is designed for short, explicit commands. 
 - Visit websites and search Google or YouTube, including in a named browser.
 - Dictate into the focused text field and explicitly ask to press Enter.
 - Create a note in Apple Notes or a document in TextEdit, then dictate its contents.
+- Copy, cut, paste, undo, and redo in text fields.
+- Open, switch, and close browser tabs; go back or forward; reload; zoom in, out, or reset.
+- Scroll up or down, or jump to the top or bottom of a page.
+- Search in Finder and scroll Finder's file list.
 - Enter full screen or minimize the current window or a named running app.
 - Run multiple commands in one listening session.
 
-Clipboard editing, browser tabs/history/reload/zoom, scrolling, and Finder search are known failures deferred to v0.2. The full list is below. More complex workflows can stop when Jev Pilot cannot find or verify a required control.
+More complex workflows can stop when Jev Pilot cannot find or verify a required control.
 
 ## Install
 
@@ -76,7 +80,7 @@ To skip routine confidence prompts for other supported commands as well, use:
 jvpilot --listen --yes
 ```
 
-These commands always require approval, even with `--yes`: cutting text, closing a browser tab, pressing Enter outside Notes or TextEdit, and using an unfamiliar control. Clipboard editing and browser tab controls are deferred to v0.2. Existing safety blocks and target/result checks remain active; password, payment, purchase, and deletion requests are blocked.
+These commands always require approval, even with `--yes`: cutting text, closing a browser tab, pressing Enter outside Notes or TextEdit, and using an unfamiliar control. Existing safety blocks and target/result checks remain active; password, payment, purchase, and deletion requests are blocked.
 
 Then:
 
@@ -105,33 +109,41 @@ Stop by saying **“stop listening,” “stop pilot,”** or **“quit pilot.�
 | Create and fill a note | “create a new note in Notes and type hello world” |
 | Create and fill a document | “create a new document in TextEdit and type hello world” |
 | Select text | “select all” |
+| Edit with the clipboard | “copy” · “cut” · “paste” |
+| Undo or redo | “undo” · “redo” |
+| Browser tabs | “open a new tab” · “go to the next tab” · “go to the previous tab” · “switch to the GitHub tab” · “close this tab” |
+| Browser history | “go back” · “go forward” · “reload the page” |
+| Zoom a page | “zoom in” · “zoom out” · “reset zoom” |
+| Scroll | “scroll down” · “scroll up a lot” · “scroll to the top” · “scroll to the bottom” |
+| Search in Finder | “search Finder for invoices” |
 | Enter full screen | “maximize this window” · “maximize Safari” |
 | Minimize a window | “minimize this window” · “minimize Safari” |
 | Stop the session | “stop listening” |
 
 Text commands need an editable field; select-all also needs existing text. Typing inserts at the caret or replaces selected text. “Maximize” means enter full screen. Use short, explicit requests and name the app for document workflows. If a command is misheard, wait for its result and speak a fresh instruction; completed actions are not automatically undone.
 
-## Deferred to v0.2
+## How it works
 
-These controls failed current manual testing and are not supported in v0.1:
+<p align="center">
+  <img src="https://raw.githubusercontent.com/amapara27/jev-pilot/main/docs/assets/how-it-works.svg" alt="How Jev Pilot works: you speak, speech is transcribed on your Mac, Jev Pilot looks at the screen, Jev picks an action, a safety check runs, the action happens in the app, and the result is checked before looping back for more steps or getting ready for the next command." width="820">
+</p>
 
-- Copy and paste; cut and paste; undo and redo.
-- Creating, switching, and closing browser tabs.
-- Browser back/forward history, reload, and zoom.
-- Scrolling and going to the top or bottom.
-- Finder search and Finder scrolling.
+1. **Listen:** your speech is turned into text locally. A pause marks the end of a command.
+2. **Look:** Jev Pilot reads what's on screen through macOS Accessibility, the same interface screen readers use. It sees the open apps, text fields, menus and scrollable areas.
+3. **Decide:** Jev receives your command and a short list of the actions currently possible, then picks one. It can only choose from that list.
+4. **Check and act:** local safety rules can block the action or ask for your approval. Jev Pilot then performs the action and confirms that the app actually changed before taking another step.
 
-Experimental handlers may still receive these requests. They need real-app fixes and acceptance testing before they can be advertised as supported. Website navigation and Google/YouTube searches are supported in v0.1.
+Nothing is retried blindly. If a result can't be confirmed, Jev Pilot stops and tells you. For module-level detail, see [the architecture guide](docs/ARCHITECTURE.md).
 
 ## Limits and privacy
 
-Menus must expose supported English labels. Browser compatibility varies; opening tabs in Helium and other browser-specific controls remain future work. Quitting apps, creating Terminal windows, submitting Terminal commands, and choosing a Music playlist are not supported. Secure, read-only, or unreadable text fields cannot be edited.
+Menus must expose supported English labels. Browser tab, history, and zoom controls are tested in Safari; other browsers vary, opening tabs in Helium and other browser-specific controls remain future work. Quitting apps, creating Terminal windows, submitting Terminal commands, and choosing a Music playlist are not supported. Secure, read-only, or unreadable text fields cannot be edited.
 
 An `unsupported` result means no suitable action was available. An `unverified` result means an action may have happened, but Jev Pilot could not confirm it. Check the app before repeating a command, especially note creation or typing.
 
 Speech transcription runs on your Mac. Jev requests send your spoken goal and bounded app/control metadata to TypeSafe. Existing document values and clipboard contents stay local. Session reports contain transcripts and dictated text; review them before sharing.
 
-**Do not speak passwords, API keys, access tokens, or other credentials.** In v0.1, spoken goals are sent to TypeSafe and saved in local session reports; credential detection and redaction are not provided. Finder candidate filenames may be sent to TypeSafe, but their full file paths stay local unless you include a path in your spoken goal.
+**Do not speak passwords, API keys, access tokens, or other credentials.** Spoken goals are sent to TypeSafe and saved in local session reports; credential detection and redaction are not provided. Finder candidate filenames may be sent to TypeSafe, but their full file paths stay local unless you include a path in your spoken goal.
 
 ## Troubleshooting
 
@@ -140,8 +152,30 @@ Speech transcription runs on your Mac. Jev requests send your spoken goal and bo
 - **Quiet speech is missed:** lower `--speech-threshold` slightly from its default `0.012`; raise it if background noise triggers utterances.
 - **Desktop controls are unavailable:** check Accessibility for the same Terminal/Python host used to listen. The app must expose the relevant control or editable field.
 - **An app opens but a workflow stops:** check the result before trying again. Opening, creation, focus, and typing are separate steps.
-- **A v0.2 command fails:** these controls are listed above as known limitations. Check the app before repeating an experimental command that reports `unverified`.
+- **A command reports `unverified`:** check the app before repeating it. Scrolling needs a scrollable area that macOS Accessibility exposes, and some apps don't expose one.
 - **Share a failure:** the latest session report is saved after each command to `~/Library/Application Support/Jev Pilot/Reports/python-cli-last.json`. Use `--report .build/my-session.json` to choose another path. Remove private transcript or dictation content before sharing.
+
+## Roadmap
+
+### Next release: everyday control
+
+- **Click things by name:** “click Sign in” · “open the Pricing link”, for buttons and links on web pages and in apps.
+- **Voice text editing:** “delete the last word” · “replace Tuesday with Wednesday” · “new paragraph” · “select the last sentence”.
+- **Media and system controls:** “pause music” · “next song” · “play my Main playlist” · “volume to 30” · “turn on dark mode”.
+- **Window layout:** “put Safari on the left half” · “move this window to the other screen”.
+- **Quit apps and close windows:** “quit Music” · “close this window”, with approval whenever unsaved work could be lost.
+
+### Later: multi-step commands
+
+- **Chained requests:** “open Safari, go to GitHub, and open a new tab” as one sentence, with each step checked before the next.
+- **Apple Shortcuts:** “run my Morning shortcut”.
+
+### Ideas: voice-played games
+
+- **Voice chess:** say “knight to f3” to play on sites with typed move entry, such as Lichess.
+- **Mental-math sprints:** speak answers in Zetamac-style arithmetic drills.
+- **Quiz games:** answer Sporcle or Seterra quizzes, and type Wordle guesses, by voice.
+- **Desktop speedrun:** a timed built-in challenge (“open Notes, write a haiku, then search YouTube for lofi”) that teaches the commands and scores your speed and accuracy.
 
 ## Local development
 
@@ -156,14 +190,24 @@ jvpilot --listen --auto-approve-basic
 
 Jev Pilot's PyPI package and installed command are both named `jvpilot`; `python -m app` is also available. Package version and build settings live in `pyproject.toml`; dependencies are listed in `requirements.txt`.
 
-In each new terminal, run `source .venv/bin/activate` from the checkout before starting the development CLI or running checks. Install the test/build tools once, then run the checks:
+In each new terminal, run `source .venv/bin/activate` from the checkout before starting the development CLI or running checks.
+
+CI runs a small offline suite that uses fake apps, a fake microphone and a fake Jev. To run it locally:
 
 ```sh
 uv pip install pip 'setuptools>=77' packaging pyyaml
 python -m unittest discover -s tests -p 'test_*.py' -v
-python -m compileall -q app scripts tests
 ```
 
-The offline suites use simulated desktop, speech, and provider services. They do not establish real-app compatibility. Opt-in provider checks use `JEV_LIVE_JEV=1`, require your API key, and make real API requests with simulated desktop actions. Native acceptance scripts in `scripts/` require macOS; the TextEdit typing check creates and edits a disposable document. Finder search, scrolling, and browser controls remain deferred regardless of offline test results.
+Real-app behavior is tested with the native matrix. It needs Accessibility for your terminal and a configured API key, and it calls live Jev:
+
+```sh
+python -m scripts.native_matrix --list          # show cases
+python -m scripts.native_matrix                 # run every case once
+python -m scripts.native_matrix --only v0.2 --repeat 3
+python -m scripts.native_matrix --voice         # speak each goal with `say`, then run the transcript
+```
+
+The matrix opens its own disposable TextEdit document, Safari window (served from a local page) and Finder folder, runs each command, then checks the result independently using AppleScript, page-reported scroll/zoom/load events and Accessibility reads. Each run records the first failing stage (`discovery`, `selection`, `blocked`, `dispatch` or `verification`) in `.build/native-matrix.json`. It exits nonzero only if a v0.1 command fails. Leave the Mac alone while it runs, because it moves focus between apps. It also overwrites your clipboard.
 
 See [the architecture guide](docs/ARCHITECTURE.md) for implementation details. Restart the listener after changing code.

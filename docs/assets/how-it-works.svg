@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 680" width="1600" height="680" role="img" aria-label="How Jev Pilot works: you speak, speech is transcribed on your Mac, Jev Pilot looks at the screen, Jev picks an action, a safety check runs, the action happens in the app, the result is checked, and it loops back for more steps or is ready for the next command.">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1f2124"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: Inter, -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif; text-anchor: middle; }
+    .title { font-size: 28px; font-weight: 700; }
+    .sub { font-size: 22px; }
+    .light .title { fill: #fcfaeb; } .light .sub { fill: #b9b6a6; }
+    .dark .title { fill: #1f2124; } .dark .sub { fill: #4a4840; }
+    .edge { stroke: #1f2124; stroke-width: 4; fill: none; marker-end: url(#arrow); }
+    .label { font-size: 22px; font-weight: 600; fill: #8a6f00; }
+  </style>
+  <rect width="1600" height="680" fill="#fcfaeb"/>
+
+  <!-- Row 1, left to right -->
+  <g class="dark">
+    <rect x="80" y="110" width="300" height="130" rx="24" fill="none" stroke="#1f2124" stroke-width="3"/>
+    <text class="title" x="230" y="168">You speak</text>
+    <text class="sub" x="230" y="203">“open Safari”</text>
+  </g>
+  <g class="light">
+    <rect x="460" y="110" width="300" height="130" rx="24" fill="#1f2124"/>
+    <text class="title" x="610" y="168">Speech to text</text>
+    <text class="sub" x="610" y="203">runs locally</text>
+  </g>
+  <g class="light">
+    <rect x="840" y="110" width="300" height="130" rx="24" fill="#1f2124"/>
+    <text class="title" x="990" y="168">Look at the screen</text>
+    <text class="sub" x="990" y="203">apps, fields, menus</text>
+  </g>
+  <g class="dark">
+    <rect x="1220" y="110" width="300" height="130" rx="24" fill="#e3be2e"/>
+    <text class="title" x="1370" y="168">Jev picks an action</text>
+    <text class="sub" x="1370" y="203">from what’s possible</text>
+  </g>
+
+  <!-- Row 2, right to left -->
+  <g class="light">
+    <rect x="1220" y="400" width="300" height="130" rx="24" fill="#1f2124"/>
+    <text class="title" x="1370" y="458">Safety check</text>
+    <text class="sub" x="1370" y="493">block or ask you</text>
+  </g>
+  <g class="light">
+    <rect x="840" y="400" width="300" height="130" rx="24" fill="#1f2124"/>
+    <text class="title" x="990" y="458">Do it</text>
+    <text class="sub" x="990" y="493">in the real app</text>
+  </g>
+  <g class="light">
+    <rect x="460" y="400" width="300" height="130" rx="24" fill="#1f2124"/>
+    <text class="title" x="610" y="458">Check it worked</text>
+    <text class="sub" x="610" y="493">never retried blindly</text>
+  </g>
+  <g class="dark">
+    <rect x="80" y="400" width="300" height="130" rx="24" fill="none" stroke="#1f2124" stroke-width="3"/>
+    <text class="title" x="230" y="458">Ready</text>
+    <text class="sub" x="230" y="493">for the next command</text>
+  </g>
+
+  <!-- Flow -->
+  <path class="edge" d="M384,175 H452"/>
+  <path class="edge" d="M764,175 H832"/>
+  <path class="edge" d="M1144,175 H1212"/>
+  <path class="edge" d="M1370,244 V392"/>
+  <path class="edge" d="M1216,465 H1148"/>
+  <path class="edge" d="M836,465 H768"/>
+  <path class="edge" d="M456,465 H388"/>
+  <text class="label" x="422" y="448">done</text>
+  <path class="edge" d="M610,396 C610,320 990,330 990,248"/>
+  <text class="label" x="740" y="376">more steps</text>
+
+  <!-- Legend -->
+  <rect x="560" y="598" width="26" height="26" rx="6" fill="#1f2124"/>
+  <text x="680" y="619" style="font-size:22px;fill:#4a4840">On your Mac</text>
+  <rect x="820" y="598" width="26" height="26" rx="6" fill="#e3be2e"/>
+  <text x="962" y="619" style="font-size:22px;fill:#4a4840">Jev, via TypeSafe</text>
+</svg>

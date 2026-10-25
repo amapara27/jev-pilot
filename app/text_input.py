@@ -181,8 +181,9 @@ class NativeText:
             role_error, raw_role = self.ax.AXUIElementCopyAttributeValue(current, "AXRole", None)
             subrole_error, raw_subrole = self.ax.AXUIElementCopyAttributeValue(current, "AXSubrole", None)
             absent = {AX.kAXErrorAttributeUnsupported, AX.kAXErrorNoValue}
-            # AppKit menus and application roots have no meaningful subrole.
-            optional_subrole = role_error == 0 and raw_role in MENU_ROLES | {'AXApplication'} and subrole_error == AX.kAXErrorFailure
+            # AppKit menus, application roots and structural groups (e.g. Finder's toolbar search group) have no
+            # meaningful subrole; secure, protected-content and parent checks below still apply to them.
+            optional_subrole = role_error == 0 and raw_role in MENU_ROLES | {'AXApplication', 'AXGroup'} and subrole_error == AX.kAXErrorFailure
             if role_error != 0 or subrole_error not in absent | {0} and not optional_subrole:
                 self.count_reason("ancestry_rejections", f"role_error_{role_error}_subrole_error_{subrole_error}")
                 self.count_reason('ancestry_failure_roles', str(raw_role or 'unavailable')[:64])

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -25,6 +26,8 @@ from test_speech_e2e import FakeMicrophone, FakeSpeechModel
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# Read the version so release bumps don't need test edits.
+VERSION = tomllib.loads((ROOT / 'pyproject.toml').read_text())['project']['version']
 
 
 class PackagingEndToEnd(unittest.TestCase):
@@ -91,15 +94,15 @@ class PackagingEndToEnd(unittest.TestCase):
             source, = dist.glob('*.tar.gz')
             with zipfile.ZipFile(wheel) as archive:
                 files = archive.namelist()
-                self.assertTrue(all(name.startswith(('app/', 'jvpilot-0.1.0.dist-info/')) for name in files))
-                metadata = Parser().parsestr(archive.read('jvpilot-0.1.0.dist-info/METADATA').decode())
+                self.assertTrue(all(name.startswith(('app/', f'jvpilot-{VERSION}.dist-info/')) for name in files))
+                metadata = Parser().parsestr(archive.read(f'jvpilot-{VERSION}.dist-info/METADATA').decode())
                 self.assertEqual(metadata['Name'], 'jvpilot')
-                self.assertEqual(metadata['Version'], '0.1.0')
+                self.assertEqual(metadata['Version'], VERSION)
                 self.assertEqual(metadata['Requires-Python'], '>=3.12')
                 self.assertEqual({str(Requirement(item)) for item in metadata.get_all('Requires-Dist')},
                                  {str(Requirement(item)) for item in (ROOT / 'requirements.txt').read_text().splitlines() if item.strip()})
                 entries = configparser.ConfigParser()
-                entries.read_string(archive.read('jvpilot-0.1.0.dist-info/entry_points.txt').decode())
+                entries.read_string(archive.read(f'jvpilot-{VERSION}.dist-info/entry_points.txt').decode())
                 self.assertEqual(dict(entries['console_scripts']), {'jvpilot': 'app.cli:main'})
             with tarfile.open(source) as archive:
                 source_files = archive.getnames()
