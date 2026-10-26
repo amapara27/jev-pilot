@@ -179,7 +179,7 @@ Speech transcription runs on your Mac. Jev requests send your spoken goal and bo
 
 ## Local development
 
-The active runtime is the Python CLI in `app/`; the retained Swift sources are historical references. From a source checkout, use uv to create a local environment and install the project in editable mode:
+The runtime is the Python CLI in `app/`. From a source checkout, use uv to create a local environment and install the project in editable mode:
 
 ```sh
 uv venv --python 3.12

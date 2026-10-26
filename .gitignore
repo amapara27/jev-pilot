@@ -2,10 +2,6 @@
 .build/
 /build/
 /dist/
-.swiftpm/
-xcuserdata/
-DerivedData/
-*.xcuserstate
 *.env
 __pycache__/
 *.py[cod]
@@ -17,14 +13,5 @@ __pycache__/
 htmlcov/
 *.log
 .venv/
-
-# Inactive Swift references retained only for local migration work.
-/Sources/
-/Resources/
-/Package.swift
-/Package.resolved
-/Tests/JevPilotCoreTests/
-/tests/JevPilotCoreTests/
-/legacy_swift/
 
 .codex

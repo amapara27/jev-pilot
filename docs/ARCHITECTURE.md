@@ -2,7 +2,7 @@
 
 The active runtime is `jvpilot` (also `python -m app`): typed goals or continuous local Nemotron
 speech, one factorized Jev request per step, bounded typing preparation, native
-app/editor effects, and verified reports. Swift sources are retired references.
+app/editor effects, and verified reports. The earlier Swift app was removed (see git history before cf6079a).
 
 ```text
 goal → sensitive-goal block → native app + bounded AX editor snapshot
