@@ -11,6 +11,12 @@ from .web_navigation import WEB_OPERATIONS, normalize_web_url
 from .interactions import WINDOW_COMMANDS
 
 
+SAFARI_UNPROMPTED_COMMANDS = {'new_tab', 'close_tab'}
+# Requested clicks on these labels still ask: they send, commit or sign out.
+COMMITTING_LABEL = re.compile(r"\b(?:send|submit|pay|order|checkout|check\s+out|confirm|sign\s+out|log\s*out|post|publish|"
+                              r"unsubscribe|transfer|eject|install|restart|shut\s+down|quit)\b", re.I)
+
+
 def blocked_goal(goal: str) -> bool:
     """Keep credential, purchase, and destructive requests away from the provider."""
 
@@ -38,6 +44,10 @@ def disposition(action: ActionCandidate, confidence: float, *, auto_approve_basi
 
     if action.kind == "STOP":
         return "deny"
+    # User preference: Safari new/close tab never prompt; tab count is still verified after the effect.
+    if (action.kind == 'KEYBOARD_ACTION' and action.parameters.get('bundle_identifier') == 'com.apple.Safari'
+            and action.parameters.get('command') in SAFARI_UNPROMPTED_COMMANDS):
+        return 'allow'
     if action.kind in {'KEYBOARD_ACTION', 'SCROLL'}:
         if action.parameters.get('bundle_identifier') in {'com.apple.Terminal', 'com.googlecode.iterm2'} and action.kind == 'KEYBOARD_ACTION' and action.parameters.get('command') not in WINDOW_COMMANDS:
             return 'deny'
@@ -51,6 +61,9 @@ def disposition(action: ActionCandidate, confidence: float, *, auto_approve_basi
         label = action.parameters.get("label", "")
         if blocked_goal(label) or action.parameters.get("bundle_identifier") == "com.apple.Terminal":
             return "deny"
+        # User preference: a control the user explicitly asked to click doesn't prompt, unless its label commits something.
+        if action.parameters.get("requested_click") and not COMMITTING_LABEL.search(label):
+            return "allow"
         return 'confirm' if requires_confirmation(action) or confidence < 0.82 else 'allow'
     if action.kind == "SEARCH" and (not action.parameters.get("text") or len(action.parameters["text"]) > 4096 or any(ord(c) < 32 or c in "\u2028\u2029" for c in action.parameters["text"])):
         return "deny"

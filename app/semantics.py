@@ -7,7 +7,7 @@ import re
 
 from .models import ActionCandidate, JSONValue
 from .web_navigation import WEB_OPERATIONS, navigation_spans, normalize_web_url, search_url, suffix_search_span
-from .interactions import PATTERNS, command_actions, action_operation
+from .interactions import PATTERNS, QUOTES, command_actions, action_operation
 
 
 # Every operation stays visible even when parsing finds no matching verb or payload.
@@ -176,6 +176,7 @@ class SemanticMenu:
                     description = f"{'Select' if operation == 'SELECT_ITEM' else 'Open'} {target['label']!r} ({target['url']})."
                 if operation == "PRESS_CONTROL":
                     parameters["label"] = target["label"]
+                    parameters["requested_click"] = requested_click(self.goal, target["label"])
                     description = f"Press {target['label']!r} in the active app."
                 action = ActionCandidate(f"{operation}:{identifier}", operation, parameters, description)
         return semantic, action
@@ -266,6 +267,18 @@ def extract_payloads(goal: str) -> dict[str, dict[str, JSONValue]]:
             for index, (start, end) in enumerate(spans)
         },
     }
+
+
+def requested_click(goal: str, label: str) -> bool:
+    """True when the user asked to click this control by name, so safety can skip the unfamiliar-control prompt."""
+
+    masked = re.sub(QUOTES, " ", goal)
+    words = set(re.findall(r"\w+", str(label).casefold()))
+    for match in re.finditer(r"\b(?:click|tap|press|choose)\b(.*?)(?=\s+(?:and|then)\b|[.!?]|$)", masked, re.I):
+        named = set(re.findall(r"\w{3,}", match.group(1).casefold())) - {"the", "this", "that", "button", "link", "tab"}
+        if named & words:
+            return True
+    return False
 
 
 def required_workflow_operations(goal: str) -> set[str]:

@@ -240,12 +240,12 @@ class InputActionsEndToEnd(unittest.TestCase):
         Path('.build/yes-workflow-approvals-e2e.json').write_text(json.dumps(records, indent=2))
 
     def test_yes_keeps_risky_interaction_prompts_in_text_and_voice(self):
-        """Cut, tab closure and generic Enter never inherit routine auto-approval."""
+        """Cut, tab closure outside Safari and generic Enter never inherit routine auto-approval."""
 
         records = {}
         for voice in (False, True):
             for command, goal, label, bundle in [('cut', 'cut', 'Cut', 'com.apple.TextEdit'),
-                                                ('close_tab', 'close this tab', 'Close Tab', 'com.apple.Safari'),
+                                                ('close_tab', 'close this tab', 'Close Tab', 'com.google.Chrome'),
                                                 ('enter', 'hit enter', '', 'com.example.Editor')]:
                 desktop, ax, _, _ = input_setup(value='hello', selection=(0, 5), bundle=bundle)
                 desktop.interactions.pasteboard = SimpleNamespace(changeCount=lambda: 1)

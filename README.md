@@ -80,7 +80,7 @@ To skip routine confidence prompts for other supported commands as well, use:
 jvpilot --listen --yes
 ```
 
-These commands always require approval, even with `--yes`: cutting text, closing a browser tab, pressing Enter outside Notes or TextEdit, and using an unfamiliar control. Existing safety blocks and target/result checks remain active; password, payment, purchase, and deletion requests are blocked.
+These commands always require approval, even with `--yes`: cutting text, closing a tab in browsers other than Safari, pressing Enter outside Notes or TextEdit, and pressing a control you didn't name. Opening and closing Safari tabs never ask. When you ask to click a named control, such as “click the ESPN video,” it is pressed without asking, unless its label sends or commits something, such as Send, Submit, Pay, Checkout, or Sign out. Existing safety blocks and target/result checks remain active; password, payment, purchase, and deletion requests are blocked.
 
 Then:
 
