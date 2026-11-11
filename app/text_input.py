@@ -240,7 +240,8 @@ class NativeText:
             return value
         return None
 
-    def inspect(self, element: object, pid: int, bundle_id: str, window: object, focused: object) -> TextField | None:
+    def inspect(self, element: object, pid: int, bundle_id: str, window: object, focused: object,
+                *, identifier: str | None = None) -> TextField | None:
         """Retain focused text only after native availability and write checks."""
 
         role = self.read(element, "AXRole")
@@ -298,17 +299,28 @@ class NativeText:
                 expected_insertion(value, selection, "")
             except (TextInputError, UnicodeError):
                 self.count_reason("unready_text_fields", "invalid_selection")
-        old = next((item for item in self.previous if item.pid == pid and self.equal(item.element, element)), None)
-        if old:
-            identifier = old.id
-        else:
-            identifier = f"field_{self.next_id}"
-            self.next_id += 1
+        if identifier is None:
+            old = next((item for item in self.previous if item.pid == pid and self.equal(item.element, element)), None)
+            if old:
+                identifier = old.id
+            else:
+                identifier = f"field_{self.next_id}"
+                self.next_id += 1
         labels = [self.read(element, name) for name in ("AXTitle", "AXDescription", "AXPlaceholderValue", "AXIdentifier")]
         label = next((item for item in labels if isinstance(item, str) and item), role)[:240]
         return TextField(identifier, pid, bundle_id, role, label, is_focused,
                          focusable, writable, keyboard or terminal,
                          value, selection, element, window)
+
+    def recheck(self, field: TextField, application: object, window: object) -> TextField | None:
+        """Rebuild a pinned focused field using the same checks as discovery."""
+
+        self.scan_deadline = monotonic() + 0.5
+        self.diagnostics = {}
+        focused = self.read(application, "AXFocusedUIElement")
+        if focused is None or not self.equal(focused, field.element):
+            return None
+        return self.inspect(field.element, field.pid, field.bundle_id, window, focused, identifier=field.id)
 
     def scan(self, pid: int, bundle_id: str, application: object, window: object) -> tuple[TextField, ...]:
         """Reach editor panes before broad lists consume the bounded scan budget."""

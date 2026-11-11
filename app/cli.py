@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, wait
 import json
 import os
 import queue
@@ -10,7 +11,7 @@ import select
 import sys
 import tempfile
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import TextIO
 from time import monotonic
 
@@ -21,7 +22,7 @@ from .models import ActionCandidate
 from .config import user_data_directory
 
 from .desktop import MacDesktop
-from .runtime import run_goal
+from .runtime import prepare_draft, run_goal
 from .safety import requires_confirmation
 
 
@@ -38,6 +39,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--listen", action="store_true", help="Continuously transcribe microphone utterances and send each final transcript to Jev.")
     parser.add_argument("--transcribe-only", action="store_true", help="Listen and print transcripts without calling Jev or controlling the desktop.")
     parser.add_argument("--stream-prefixes", action="store_true", help="With --listen, queue stable app-opening clauses before EOU; completed effects cannot be taken back.")
+    parser.add_argument("--draft", action=argparse.BooleanOptionalAction, default=False,
+                        help="With --listen, try a draft Jev decision during a pause.")
+    parser.add_argument("--push-to-talk", action="store_true", help="Hold Right Option to speak, then release it to finish the utterance.")
     parser.add_argument("--silence-ms", type=int, default=650, help="Quiet audio needed to commit an utterance (default: 650 ms).")
     parser.add_argument("--speech-threshold", type=float, default=0.012, help="RMS threshold for detecting speech (default: 0.012).")
     parser.add_argument("--report", type=Path, default=user_data_directory() / "Reports" / "python-cli-last.json",
@@ -99,6 +103,8 @@ def _run_voice(
     output: TextIO,
     speech_model: object | None,
     audio_source_factory: object | None,
+    key_source_factory=None,
+    approve_action=None,
 ) -> int:
     """Run local ASR continuously and hand committed transcripts to one FIFO worker."""
 
@@ -125,12 +131,73 @@ def _run_voice(
     worker_error: list[str] = []
     utterance_count = [0]
     prefixes = []
+    draft_pool = (ThreadPoolExecutor(max_workers=1, thread_name_prefix="jev-draft")
+                  if args.draft and not (args.transcribe_only or args.stream_prefixes) else None)
+    draft_lock = Lock()
+    draft_slot = None
+    draft = None
+    draft_turn = None
+    attempt_turn = None
+    attempts = draft_calls = draft_hits = 0
+    turn = 0
+    ended_at = None
+    if args.push_to_talk and key_source_factory is None:
+        from .push_to_talk import RightOptionTap
+        key_source_factory = RightOptionTap
+
+    def stop_phrase(text):
+        """Keep local stop commands out of both provider paths."""
+
+        return text.strip().casefold().strip('.!?') in {'stop listening', 'stop pilot', 'quit pilot'}
+
+    def on_pause(text):
+        """Publish one latest partial for the main thread without reading the desktop."""
+
+        nonlocal draft_slot
+        if not stop_phrase(text):
+            with draft_lock:
+                draft_slot = (turn, text)
+
+    def on_boundary(timestamp):
+        """End the draft's utterance even when it has no final transcript."""
+
+        nonlocal draft_slot, turn, ended_at
+        with draft_lock:
+            draft_slot = None
+            turn += 1
+            ended_at = timestamp
+
+    def start_draft():
+        """Observe only while idle, with at most one outstanding provider request."""
+
+        nonlocal draft_slot, draft, draft_turn, attempt_turn, attempts, draft_calls
+        if draft_pool is None or capture_done.is_set() or not committed.empty() or (draft and not draft.future.done()):
+            return
+        with draft_lock:
+            item, draft_slot = draft_slot, None
+        if item is None:
+            return
+        item_turn, text = item
+        if item_turn != attempt_turn:
+            attempt_turn, attempts = item_turn, 0
+        if attempts >= 2:
+            return
+        attempts += 1
+        try:
+            candidate = prepare_draft(text, target_desktop, draft_pool.submit, model=args.model, client=client)
+        except Exception:
+            # The final path reports any error that persists after a fresh observation.
+            return
+        if candidate is not None:
+            draft, draft_turn = candidate, item_turn
+            draft_calls += 1
 
     def commit(text, prefix=False, intended_bundle=None):
         """Queue text and app context; partial clauses share the same five-goal bound."""
 
         try:
-            committed.put_nowait((text, prefix, intended_bundle))
+            committed.put_nowait((text, prefix, intended_bundle, None if prefix else turn - 1,
+                                  None if prefix else ended_at))
             if prefix:
                 prefixes.append(text)
                 print(f"\nQueued early: {text}", file=output, flush=True)
@@ -154,7 +221,7 @@ def _run_voice(
 
         transcripts.append(text)
         print(f"\nTranscript: {text}", file=output, flush=True)
-        if not args.transcribe_only and text.strip().casefold().strip('.!?') in {'stop listening', 'stop pilot', 'quit pilot'}:
+        if not args.transcribe_only and stop_phrase(text):
             stopping.set()
             return
         if args.transcribe_only:
@@ -172,9 +239,12 @@ def _run_voice(
                 model,
                 on_final,
                 on_partial=on_partial,
+                on_pause=on_pause if draft_pool is not None else None,
+                on_boundary=on_boundary,
                 stop_event=stopping,
                 eou_silence_ms=args.silence_ms,
                 speech_threshold=args.speech_threshold,
+                key_source_factory=key_source_factory,
                 **({"audio_source_factory": audio_source_factory} if audio_source_factory else {}),
             )
         except Exception as caught:
@@ -186,6 +256,8 @@ def _run_voice(
     def approve(action: ActionCandidate) -> bool:
         """Skip routine confidence prompts with --yes; retain mandatory approvals."""
 
+        if approve_action is not None:
+            return approve_action(action)
         if args.yes and not requires_confirmation(action):
             return True
         if not sys.stdin.isatty():
@@ -200,7 +272,16 @@ def _run_voice(
     def execute(item) -> None:
         """Run one queued transcript synchronously on the main/AppKit thread."""
 
-        goal, prefix, intended_bundle = item
+        nonlocal draft, draft_slot, draft_hits
+        goal, prefix, intended_bundle, goal_turn, speech_ended_at = item
+        current_draft, draft = draft, None
+        if current_draft is not None and draft_turn != goal_turn:
+            while not current_draft.future.done() and not stopping.is_set():
+                wait((current_draft.future,), timeout=0.05)
+            current_draft = None
+        if stopping.is_set():
+            pending.append(goal)
+            return
         result = run_goal(
             goal,
             target_desktop,
@@ -213,12 +294,19 @@ def _run_voice(
             intended_bundle=intended_bundle if not prefix else None,
             stream_app=intended_bundle if prefix else None,
             auto_approve_basic=args.auto_approve_basic,
+            draft=current_draft,
+            speech_ended_at=speech_ended_at,
         )
+        if draft_pool is not None:
+            result.setdefault("draft", {"status": "none", "wait_ms": 0})
+            draft_hits += result["draft"]["status"] == "hit"
         entry = {"transcript": goal, "source": "stable_prefix" if prefix else "final", **result}
         runs.append(entry)
         print(json.dumps(entry, indent=2, sort_keys=True), file=output, flush=True)
         if result["outcome"] not in {"completed", "dry_run"}:
             worker_error.append(str(result.get("reason", result["outcome"])))
+            with draft_lock:
+                draft_slot = None
             # Queued follow-ups may depend on this effect; only newly spoken goals resume.
             while not committed.empty():
                 pending.append(committed.get_nowait()[0])
@@ -243,12 +331,15 @@ def _run_voice(
         }
         if worker_error:
             result['worker_error'] = worker_error[-1]
+        if draft_pool is not None:
+            result['drafts'] = {'calls': draft_calls, 'wasted': draft_calls - draft_hits}
         return result
 
     error = None
     if args.transcribe_only:
         try:
-            source_kwargs = {"eou_silence_ms": args.silence_ms, "speech_threshold": args.speech_threshold}
+            source_kwargs = {"eou_silence_ms": args.silence_ms, "speech_threshold": args.speech_threshold,
+                             "key_source_factory": key_source_factory}
             if audio_source_factory is not None:
                 source_kwargs["audio_source_factory"] = audio_source_factory
             utterance_count[0] = run_live_asr(
@@ -269,6 +360,8 @@ def _run_voice(
                 try:
                     goal = committed.get(timeout=0.05)
                 except queue.Empty:
+                    if not stopping.is_set():
+                        start_draft()
                     continue
                 try:
                     execute(goal)
@@ -280,6 +373,8 @@ def _run_voice(
             stopping.set()
             print("\nListening stopped; unfinished speech was discarded.", file=output)
         finally:
+            if draft_pool is not None:
+                draft_pool.shutdown(wait=False, cancel_futures=True)
             if stopping.is_set():
                 capture_thread.join()
             elif capture_done.is_set():
@@ -317,6 +412,8 @@ def main(
     args = _parser().parse_args(argv)
     if args.stream_prefixes and (not args.listen or args.transcribe_only):
         _parser().error("--stream-prefixes requires --listen without --transcribe-only")
+    if args.push_to_talk and (not (args.listen or args.transcribe_only) or args.stream_prefixes):
+        _parser().error("--push-to-talk requires --listen or --transcribe-only and cannot be combined with --stream-prefixes")
     if args.request_accessibility:
         trusted = bool(AX.AXIsProcessTrustedWithOptions({AX.kAXTrustedCheckOptionPrompt: True}))
         print(json.dumps({"python_executable": sys.executable, "accessibility_trusted": trusted}, indent=2), file=output)

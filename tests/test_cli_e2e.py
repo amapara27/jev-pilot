@@ -44,6 +44,11 @@ class FakeDesktop(MacDesktop):
             self.active = FINDER
         return DesktopState(self.active, (SAFARI, TERMINAL), True, True)
 
+    def recheck(self, action, before):
+        """Keep this fake's native boundary at controlled observations."""
+
+        return self.snapshot()
+
     def execute(self, action):
         self.effects += 1
         if self.effect_visible:

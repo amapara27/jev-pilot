@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 from queue import Empty, Full, Queue
 from threading import Event
@@ -15,6 +16,7 @@ AUDIO_BLOCK_SAMPLES = 1_024
 MAX_AUDIO_BLOCKS = 64
 DEFAULT_EOU_SILENCE_MS = 650
 DEFAULT_SPEECH_THRESHOLD = 0.012
+DRAFT_AFTER_MS = 150
 
 
 class AudioInputError(RuntimeError):
@@ -136,8 +138,11 @@ def run_live_asr(
     on_final: Callable[[str], None],
     *,
     on_partial: Callable[[str], None] = lambda _: None,
+    on_pause: Callable[[str], None] | None = None,
+    on_boundary: Callable[[float], None] = lambda _: None,
     stop_event: Event | None = None,
     audio_source_factory: Callable[[int, Callable[[object], None]], object] = SoundDeviceAudioSource,
+    key_source_factory: Callable[[Callable[[str], None]], object] | None = None,
     eou_silence_ms: int = DEFAULT_EOU_SILENCE_MS,
     speech_threshold: float = DEFAULT_SPEECH_THRESHOLD,
     max_audio_blocks: int = MAX_AUDIO_BLOCKS,
@@ -149,47 +154,121 @@ def run_live_asr(
     stopping = stop_event or Event()
     first_session = model.create_streaming_session(temperature=0.0, language=None)
     sample_rate = int(first_session.input_sample_rate)
-    audio_queue: Queue[np.ndarray] = Queue(maxsize=max_audio_blocks)
+    audio_queue: Queue[tuple[np.ndarray | str, float]] = Queue(maxsize=max_audio_blocks)
     overflow = Event()
+
+    def enqueue(item, captured_at):
+        """Put keyboard transitions in the same ordered stream as audio blocks."""
+
+        try:
+            audio_queue.put_nowait((item, captured_at))
+        except Full:
+            overflow.set()
 
     def queue_audio(samples: object) -> None:
         """Copy valid mono samples to the bounded queue or flag overload explicitly."""
 
+        captured_at = monotonic()
         audio = np.asarray(samples, dtype=np.float32).reshape(-1)
         if not np.isfinite(audio).all():
             overflow.set()
             return
-        try:
-            audio_queue.put_nowait(audio.copy())
-        except Full:
-            overflow.set()
+        enqueue(audio.copy(), captured_at)
 
     source = audio_source_factory(sample_rate, queue_audio)
+    keys = key_source_factory(lambda key: enqueue(key, monotonic())) if key_source_factory else None
     session = first_session
     text = ""
     speaking = False
     quiet_samples = 0
+    pause_reported = False
+    speech_end = last_audio = monotonic()
     utterances = 0
+    pressed = cancelled = held_speech = False
+    release_at = None
+    tail_samples = 0
+    preroll = deque()
+    preroll_samples = 0
+    preroll_limit = sample_rate * 300 // 1_000
 
-    def finish_utterance() -> None:
-        """Flush one EOU exactly once before opening an independent next session."""
+    def reset_session() -> None:
+        """Open an independent ASR session after a commit or cancellation."""
 
-        nonlocal session, text, speaking, quiet_samples, utterances
-        session.close()
-        while not session.done:
-            text, changed = _append_deltas(session, text)
-            if text:
-                on_partial(text)
-        final_text = text.strip()
-        if final_text:
-            on_final(final_text)
-            utterances += 1
+        nonlocal session, text, speaking, quiet_samples, pause_reported, held_speech
         session = model.create_streaming_session(temperature=0.0, language=None)
         text = ""
-        speaking = False
+        speaking = pause_reported = held_speech = False
         quiet_samples = 0
 
+    def finish_utterance(ended_at: float) -> None:
+        """Finalize once and publish the speech boundary with the exact transcript."""
+
+        nonlocal utterances
+        on_boundary(ended_at)
+        session.close()
+        final_text = text
+        while not session.done and not stopping.is_set():
+            final_text, _ = _append_deltas(session, final_text)
+            if final_text:
+                on_partial(final_text)
+        final_text = final_text.strip()
+        if not stopping.is_set() and final_text:
+            on_final(final_text)
+            utterances += 1
+        if not getattr(session, "done", False):
+            session.cancel()
+        reset_session()
+
+    def feed(audio, captured_at, *, allow_pause=True):
+        """Decode audio and signal the first eligible pause before finalization."""
+
+        nonlocal text, speaking, quiet_samples, pause_reported, speech_end
+        voiced = _rms(audio) >= speech_threshold
+        session.feed(audio)
+        text, _ = _append_deltas(session, text)
+        if text:
+            on_partial(text)
+        if voiced:
+            speaking, quiet_samples, pause_reported = True, 0, False
+        elif speaking:
+            if not quiet_samples:
+                speech_end = captured_at - audio.size / sample_rate
+            quiet_samples += audio.size
+            if allow_pause and on_pause is not None and not pause_reported and text.strip() and quiet_samples * 1_000 >= DRAFT_AFTER_MS * sample_rate:
+                pause_reported = True
+                on_pause(text.strip())
+        return voiced
+
+    def buffer_preroll(audio):
+        """Keep just the last 300 ms, even for audio sources with varying block sizes."""
+
+        nonlocal preroll_samples
+        if not audio.size:
+            return
+        preroll.append(audio)
+        preroll_samples += audio.size
+        while preroll_samples > preroll_limit:
+            oldest = preroll.popleft()
+            excess = preroll_samples - preroll_limit
+            if oldest.size > excess:
+                preroll.appendleft(oldest[excess:].copy())
+            preroll_samples -= min(oldest.size, excess)
+
+    def finish_release():
+        """Commit only a released hold with speech captured while the key was down."""
+
+        nonlocal release_at
+        if held_speech:
+            finish_utterance(release_at)
+        else:
+            on_boundary(release_at)
+            session.cancel()
+            reset_session()
+        release_at = None
+
     try:
+        if keys is not None:
+            keys.start()
         source.start()
         while not stopping.is_set():
             if overflow.is_set():
@@ -199,35 +278,72 @@ def run_live_asr(
             source_error = getattr(source, "error", None)
             if source_error:
                 raise AudioInputError(f"Microphone input failed: {source_error}")
+            if keys is not None and getattr(keys, "error", None):
+                raise AudioInputError(keys.error)
             try:
-                audio = audio_queue.get(timeout=0.02)
+                item, captured_at = audio_queue.get(timeout=0.02)
             except Empty:
                 if getattr(source, "done", False) and audio_queue.empty():
                     break
                 continue
 
-            energy = _rms(audio)
-            session.feed(audio)
-            text, changed = _append_deltas(session, text)
-            if text:
-                on_partial(text)
-            if energy >= speech_threshold:
-                speaking = True
-                quiet_samples = 0
-            elif speaking:
-                quiet_samples += audio.size
+            if isinstance(item, str):
+                if item == "press" and not pressed:
+                    if release_at is not None:
+                        finish_release()
+                    pressed, cancelled = True, False
+                    for block in preroll:
+                        feed(block, captured_at, allow_pause=False)
+                    preroll.clear()
+                    preroll_samples = 0
+                elif item == "cancel" and pressed and not cancelled:
+                    cancelled = True
+                    on_boundary(captured_at)
+                    session.cancel()
+                    reset_session()
+                elif item == "release" and pressed:
+                    pressed = False
+                    if not cancelled:
+                        release_at = captured_at
+                        tail_samples = sample_rate * 150 // 1_000
+                continue
+
+            if keys is None:
+                feed(item, captured_at)
+                last_audio = captured_at
                 if quiet_samples * 1_000 >= eou_silence_ms * sample_rate:
-                    finish_utterance()
+                    finish_utterance(speech_end)
+            elif pressed:
+                if not cancelled:
+                    held_speech |= feed(item, captured_at, allow_pause=held_speech)
+            elif release_at is not None:
+                consumed = min(item.size, tail_samples)
+                if consumed:
+                    feed(item[:consumed], captured_at - (item.size - consumed) / sample_rate, allow_pause=False)
+                tail_samples -= consumed
+                if not tail_samples:
+                    finish_release()
+                    buffer_preroll(item[consumed:])
+            else:
+                buffer_preroll(item)
 
         if stopping.is_set():
             session.cancel()
-        elif speaking and text.strip():
-            finish_utterance()
+        elif keys is not None and release_at is not None:
+            finish_release()
+        elif keys is None and speaking and text.strip():
+            finish_utterance(speech_end if quiet_samples else last_audio)
         return utterances
     finally:
-        source.stop()
-        if not getattr(session, "done", False):
-            session.cancel()
+        try:
+            if keys is not None:
+                keys.stop()
+        finally:
+            try:
+                source.stop()
+            finally:
+                if not getattr(session, "done", False):
+                    session.cancel()
 
 
 def transcribe_audio_file(model: object, audio_path: str, *, chunk_seconds: float = 0.1) -> str:

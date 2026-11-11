@@ -13,7 +13,8 @@ from scripts.native_matrix import cases
 
 # Matrix cases that aren't keyboard/scroll commands route through these workflow operations instead.
 OPERATIONS = {"type_text": {"TYPE_TEXT"}, "open_app": set(), "open_website": {"OPEN_WEBSITE"},
-              "google_search": {"SEARCH_WEB"}, "finder_search": {"SEARCH"}}
+              "google_search": {"SEARCH_WEB"}, "finder_search": {"SEARCH"},
+              "caret_drift_validation": {"TYPE_TEXT"}, "caret_drift_executor": {"TYPE_TEXT"}}
 MANDATORY_APPROVAL = {"cut", "close_tab"}
 # User preference: these never prompt in Safari, even at low confidence.
 SAFARI_UNPROMPTED = {"new_tab", "close_tab"}

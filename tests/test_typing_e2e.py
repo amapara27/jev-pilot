@@ -742,6 +742,32 @@ class TypingPipelineTests(unittest.TestCase):
         self.assertEqual(report["outcome"], "failed")
         self.assertEqual(ax.effects, [])
 
+    def test_typing_rechecks_pinned_editor_without_rescanning_unrelated_nodes(self):
+        """Use native reads at the setter boundary to catch either broad recheck returning."""
+
+        desktop, ax, quartz, _ = setup()
+        unrelated = Node(AXRole="AXGroup", AXParent=ax.window)
+        ax.window.attrs["AXChildren"].append(unrelated)
+        setter = ax.AXUIElementSetAttributeValue
+        reads_at_dispatch = []
+
+        def dispatch(node, attribute, value):
+            reads_at_dispatch.extend(ax.reads)
+            return setter(node, attribute, value)
+
+        ax.AXUIElementSetAttributeValue = dispatch
+        result = run_goal('type "🦊"', desktop, client=Jev(after_call=ax.reads.clear))
+
+        self.assertEqual(result["outcome"], "completed", result)
+        self.assertTrue(result["verified"])
+        self.assertEqual(ax.effects, [("AXSelectedText", "🦊")])
+        self.assertEqual(quartz.events, [])
+        self.assertEqual(ax.editor.attrs["AXValue"], "before 🦊")
+        self.assertEqual(ax.editor.attrs["AXSelectedTextRange"], (9, 0))
+        self.assertNotIn((ax.window, "AXChildren"), reads_at_dispatch)
+        self.assertFalse(any(node is unrelated for node, _ in reads_at_dispatch))
+        self.assertGreaterEqual(reads_at_dispatch.count((ax.editor, "AXSelectedTextRange")), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

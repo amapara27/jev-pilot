@@ -89,6 +89,10 @@ Then:
 3. Wait for **“Ready for the next command.”**
 4. Say another command without restarting the listener.
 
+To control when an utterance starts and ends, run `jvpilot --listen --push-to-talk`. Hold **Right Option** while speaking and release it to finish. An Option shortcut cancels that utterance. Enable **Input Monitoring** for your terminal under **System Settings → Privacy & Security → Input Monitoring** if prompted, then restart the terminal. The same flag works with `--transcribe-only`.
+
+`jvpilot --listen --draft` lets Jev start choosing an action during a pause. The listener waits for the exact final transcript and rechecks the target before acting. Use `--no-draft` to compare with decisions made after transcription.
+
 If a `Y / n` prompt appears, enter `y` to approve or `n` to decline. After a command fails or is declined, the listener normally stays active; speak a fresh command after the result. Queued follow-up commands behind a failure are discarded.
 
 Stop by saying **“stop listening,” “stop pilot,”** or **“quit pilot.”** You can also press **Control-C** in Terminal. Stopping cancels pending work before its next action; it cannot undo an action already sent. Run the start command again for a new session.
@@ -205,9 +209,12 @@ Real-app behavior is tested with the native matrix. It needs Accessibility for y
 python -m scripts.native_matrix --list          # show cases
 python -m scripts.native_matrix                 # run every case once
 python -m scripts.native_matrix --only v0.2 --repeat 3
-python -m scripts.native_matrix --voice         # speak each goal with `say`, then run the transcript
+python -m scripts.native_matrix --only latency
+python -m scripts.native_matrix --voice         # file transcription for historical comparisons
+python -m scripts.native_matrix --live-voice --draft
+python -m scripts.native_matrix --live-voice --push-to-talk
 ```
 
-The matrix opens its own disposable TextEdit document, Safari window (served from a local page) and Finder folder, runs each command, then checks the result independently using AppleScript, page-reported scroll/zoom/load events and Accessibility reads. Each run records the first failing stage (`discovery`, `selection`, `blocked`, `dispatch` or `verification`) in `.build/native-matrix.json`. It exits nonzero only if a v0.1 command fails. Leave the Mac alone while it runs, because it moves focus between apps. It also overwrites your clipboard.
+The matrix opens its own disposable TextEdit document, Safari window and Finder folder, then checks results independently using AppleScript, page events and Accessibility reads. The latency cases move the fixture caret after Jev chooses an insertion and verify that the document stays untouched. Live voice replays synthesized speech at microphone pace and measures from the speech boundary or simulated key release to dispatch completion. The matrix saves results to `.build/native-matrix.json` and exits nonzero if a v0.1 command or latency regression case fails. Leave the Mac alone while it runs, because it moves focus between apps and overwrites your clipboard.
 
 See [the architecture guide](docs/ARCHITECTURE.md) for implementation details. Restart the listener after changing code.

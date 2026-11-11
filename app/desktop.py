@@ -120,12 +120,7 @@ class MacDesktop:
         if frontmost is None:
             raise DesktopError("No frontmost application is available.")
         active = self._app(frontmost)
-        running = tuple(
-            sorted(
-                (self._app(app) for app in self.workspace.runningApplications() if app.bundleIdentifier()),
-                key=lambda app: (app.name.casefold(), app.pid),
-            )
-        )
+        running = self.running_apps()
         ax = self.text.ax
         trusted = bool(ax.AXIsProcessTrusted())
         focused = False
@@ -163,6 +158,70 @@ class MacDesktop:
             diagnostics['interaction_discovery'] = dict(self.interactions.diagnostics)
             state = replace(state, interaction_targets=interactions, editor_diagnostics=dict(diagnostics))
         return state
+
+    def running_apps(self) -> tuple[AppState, ...]:
+        """Refresh application identities without reading their accessibility trees."""
+
+        return tuple(sorted(
+            (self._app(app) for app in self.workspace.runningApplications() if app.bundleIdentifier()),
+            key=lambda app: (app.name.casefold(), app.pid),
+        ))
+
+    def recheck(self, action: ActionCandidate, before: DesktopState) -> DesktopState:
+        """Refresh the chosen action's facts while retaining scans needed to prove uniqueness."""
+
+        if action.kind in {"CREATE_NOTE", "SELECT_ITEM", "OPEN_ITEM", "PRESS_CONTROL"}:
+            return self.snapshot()
+        native_app = self.frontmost()
+        if native_app is None or self._app(native_app) != before.active:
+            raise DesktopError("The foreground app changed while deciding or approving.")
+        active = before.active
+        ax = self.text.ax
+        trusted = bool(ax.AXIsProcessTrusted())
+        if action.kind in {"OPEN_APP", "FOCUS_APP"} | WEB_OPERATIONS:
+            if (action.parameters.get("continue_typing") or action.parameters.get("continue_workflow")) and not trusted:
+                raise DesktopError("Accessibility permission changed before app preparation.")
+            return replace(before, running=self.running_apps(), ax_trusted=trusted)
+
+        if not trusted:
+            raise DesktopError("Accessibility permission changed before dispatch.")
+        application = self.text.application(active.pid)
+        error, window = ax.AXUIElementCopyAttributeValue(application, "AXFocusedWindow", None)
+        identifier = action.parameters["element_id"]
+        if action.kind in {"PREPARE_SEARCH", "SEARCH"}:
+            original = next((item for item in before.workflow_targets if item.id == identifier), None)
+        elif action.kind in {"KEYBOARD_ACTION", "SCROLL"}:
+            original = next((item for item in before.interaction_targets if item.id == identifier), None)
+        else:
+            original = next((item for item in before.text_fields if item.id == identifier), None)
+        windowless = (action.kind == "PREPARE_SEARCH" and active.bundle_id == "com.apple.finder"
+                      and original is not None and original.window is None and window is None
+                      and error in {0, kAXErrorNoValue})
+        if not windowless and (error != 0 or window is None or original is None or original.window is None
+                               or not self.text.equal(original.window, window)):
+            raise DesktopError("The focused window changed or is unreadable before dispatch.")
+
+        fresh = before
+        if action.kind in {"PREPARE_SEARCH", "SEARCH"} or active.bundle_id == "com.apple.Notes":
+            # Finder controls must stay unique and Notes may reuse its body for a different note.
+            fresh = replace(fresh, workflow_targets=self.workflows.scan(active.pid, active.bundle_id, application, window))
+        if action.kind in {"TYPE_TEXT", "FOCUS_FIELD"}:
+            if action.kind == "FOCUS_FIELD" or active.bundle_id == "com.apple.Notes":
+                fields = self.text.scan(active.pid, active.bundle_id, application, window)
+            else:
+                current = self.text.recheck(original, application, window)
+                fields = (current,) if current else ()
+            return replace(fresh, text_fields=fields)
+        if action.kind in {"KEYBOARD_ACTION", "SCROLL"}:
+            targets = self.interactions.recheck(original, fresh, application, window, self.interaction_commands)
+            if original.command in WINDOW_COMMANDS:
+                return replace(fresh, interaction_targets=targets)
+            current_url = (browser_url(self.text, window)
+                           if active.bundle_id in BROWSER_BUNDLES or active.bundle_id == self.default_browser() else None)
+            resolved = file_identity(self.text.read(window, "AXDocument") or self.text.read(window, "AXURL"))
+            return replace(fresh, interaction_targets=targets, browser_url=current_url,
+                           document_url=resolved[0] if resolved else None)
+        return replace(fresh, running=self.running_apps())
 
     def semantic_menu(self, goal: str, state: DesktopState) -> SemanticMenu:
         """Ground installed apps and native targets, binding explicit app/workflow scope."""
@@ -354,9 +413,13 @@ class MacDesktop:
     def execute(self, action: ActionCandidate) -> None:
         """Dispatch a native app, field focus, or insertion effect without replay."""
 
+        if action.kind in WORKFLOW_KINDS | WEB_OPERATIONS | {"TYPE_TEXT", "FOCUS_FIELD", "KEYBOARD_ACTION", "SCROLL"}:
+            try:
+                fresh = self.recheck(action, self.validated_state)
+                self.validate_action(action, self.validated_state, fresh)
+            except DesktopError as error:
+                raise TextInputError(str(error), effect_sent=False) from error
         if action.kind in {'KEYBOARD_ACTION', 'SCROLL'}:
-            fresh = self.snapshot()
-            self.validate_action(action, self.validated_state, fresh)
             target = next(item for item in fresh.interaction_targets if item.id == action.parameters['element_id'])
 
             def guard():
@@ -370,11 +433,6 @@ class MacDesktop:
             self.interactions.execute(target, guard)
             return
         if action.kind in WORKFLOW_KINDS:
-            fresh = self.snapshot()
-            try:
-                self.validate_action(action, self.validated_state, fresh)
-            except DesktopError as error:
-                raise TextInputError(str(error), effect_sent=False) from error
             target = next(item for item in fresh.workflow_targets if item.id == action.parameters['element_id'])
 
             def guard():
@@ -391,8 +449,6 @@ class MacDesktop:
             self.workflows.execute(action, fresh, guard)
             return
         if action.kind in {"TYPE_TEXT", "FOCUS_FIELD"}:
-            fresh = self.snapshot()
-            self.validate_action(action, self.validated_state, fresh)
             target = next(item for item in fresh.text_fields if item.id == action.parameters["element_id"])
 
             def guard() -> bool:
@@ -424,10 +480,6 @@ class MacDesktop:
         configuration.setActivates_(True)
         completion: list[tuple[object, object]] = []
         if action.kind in WEB_OPERATIONS:
-            try:
-                self.validate_action(action, self.validated_state, self.snapshot())
-            except DesktopError as error:
-                raise TextInputError(str(error), effect_sent=False) from error
             self.workspace.openURLs_withApplicationAtURL_configuration_completionHandler_(
                 [NSURL.URLWithString_(action.parameters["url"])], url, configuration,
                 lambda app, error: completion.append((app, error)))

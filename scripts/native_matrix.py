@@ -1,6 +1,6 @@
 """Run commands against disposable real-app fixtures and check each result independently.
 
-Run from an Accessibility-trusted Terminal: python -m scripts.native_matrix [--voice] [--only copy,zoom] [--repeat 3]
+Run from an Accessibility-trusted Terminal: python -m scripts.native_matrix [--voice | --live-voice] [--only copy,zoom] [--repeat 3]
 Every case calls live Jev and real native effects, but only inside harness-owned fixtures:
 a temporary TextEdit document, a Safari window serving local pages, and a temporary Finder folder.
 """
@@ -16,19 +16,21 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from time import monotonic, perf_counter, sleep
+from types import SimpleNamespace
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 import ApplicationServices as AX
 from AppKit import NSRunningApplication
 
-from app.cli import _save_report
+from app.cli import _parser, _run_voice, _save_report
 from app.config import load_api_key
 from app.desktop import MacDesktop
 from app.runtime import run_goal
 from app.safety import requires_confirmation
+from app.text_input import TextInputError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -174,13 +176,23 @@ class Fixtures:
     def textedit(self, text: str, *, caret_end=True, select_all=False) -> None:
         subprocess.run(["open", "-a", "TextEdit", str(self.document)], check=True)
         osa('tell application "TextEdit" to activate')
-        wait_for(lambda: (self.text() is not None, None))
+        focused = ('tell application "TextEdit"\n'
+                   'if not frontmost or (count of documents) is 0 then return false\n'
+                   f'return name of front document is {json.dumps(self.document.name)}\nend tell')
+        if not wait_for(lambda: (osa(focused) == "true", None))[0]:
+            raise RuntimeError("The disposable TextEdit document did not gain focus.")
         osa(f'tell application "TextEdit" to set text of document "{self.document.name}" to {json.dumps(text)}')
         sleep(0.3)
         if select_all:
             keys('keystroke "a" using command down')
         elif caret_end:
             keys("key code 125 using command down")
+        length = len(text.encode("utf-16-le")) // 2
+        expected = (0, length) if select_all else (length, 0) if caret_end else None
+        if expected is not None:
+            ready, observed = wait_for(lambda: ((value := self.selection()) == expected, value))
+            if not ready:
+                raise RuntimeError(f"The TextEdit fixture selection was {observed}, expected {expected}; {self.selection_diagnostics}")
 
     def text(self) -> str | None:
         return osa(f'tell application "TextEdit" to get text of document "{self.document.name}"')
@@ -188,6 +200,44 @@ class Fixtures:
     def selected_text(self) -> str | None:
         return next((ax(node, "AXSelectedText") for node in ax_nodes("com.apple.TextEdit")
                      if ax(node, "AXRole") == "AXTextArea"), None)
+
+    def selection(self):
+        """Read the fixture's native selection range independently of Jev Pilot."""
+
+        apps = NSRunningApplication.runningApplicationsWithBundleIdentifier_("com.apple.TextEdit")
+        self.selection_diagnostics = {}
+        if not apps:
+            return None
+        application = AX.AXUIElementCreateApplication(apps[0].processIdentifier())
+        AX.AXUIElementSetMessagingTimeout(application, 0.5)
+        role_error, _ = AX.AXUIElementCopyAttributeValue(application, "AXRole", None)
+        error, node = AX.AXUIElementCopyAttributeValue(application, "AXFocusedUIElement", None)
+        self.selection_diagnostics.update(application_error=role_error, focus_error=error,
+                                          focused_role=ax(node, "AXRole") if node is not None else None)
+        if error or node is None or self.selection_diagnostics["focused_role"] != "AXTextArea":
+            return None
+        error, value = AX.AXUIElementCopyAttributeValue(node, "AXSelectedTextRange", None)
+        self.selection_diagnostics["range_error"] = error
+        if error == 0 and value is not None:
+            valid, bounds = AX.AXValueGetValue(value, AX.kAXValueCFRangeType, None)
+            if valid:
+                return (int(bounds[0]), int(bounds[1]))
+        return None
+
+    def move_fixture_caret(self):
+        """Introduce drift only while the expected disposable document has focus."""
+
+        name = json.dumps(self.document.name)
+        osa(f'tell application "TextEdit"\n'
+            f'if not frontmost or name of front document is not {name} then error "Fixture lost focus"\n'
+            'end tell\n'
+            'tell application "System Events"\n'
+            'tell process "TextEdit"\n'
+            'if not frontmost then error "Fixture lost focus"\n'
+            'key code 123\nend tell\nend tell')
+        moved, selection = wait_for(lambda: ((value := self.selection()) == (len(SAMPLE) - 1, 0), value))
+        if not moved:
+            raise RuntimeError(f"The fixture caret did not move: {selection}")
 
     # Safari: tab 1 is /a, tab 2 is /long, in a window only the harness opened.
     def safari(self, tab: int = 1, *, tabs: int = 2) -> None:
@@ -334,6 +384,7 @@ class Case:
     expects: str | None  # discovery token: interaction command or finder_<control>
     setup: Callable[[Fixtures], object]
     check: Callable[[Fixtures, object], tuple[bool, object]]
+    drift_at: str | None = None
 
 
 SAMPLE = "Jev matrix sample text"
@@ -342,6 +393,21 @@ SAMPLE = "Jev matrix sample text"
 def cases() -> list[Case]:
     def same(value, expected):
         return value == expected, value
+
+    def setup_caret_drift(fixtures):
+        fixtures.textedit(SAMPLE)
+
+        def ready():
+            observed = {"text": fixtures.text(), "selection": fixtures.selection()}
+            return observed == {"text": SAMPLE, "selection": (len(SAMPLE), 0)}, observed
+
+        settled, observed = wait_for(ready)
+        if not settled:
+            raise RuntimeError(f"TextEdit did not settle to the fixture text and caret at the end: {observed}")
+
+    def check_caret_drift(fixtures, _):
+        detail = {"text": fixtures.text(), "selection": fixtures.selection()}
+        return detail == {"text": SAMPLE, "selection": (len(SAMPLE) - 1, 0)}, detail
 
     return [
         # v0.1 regressions
@@ -419,6 +485,10 @@ def cases() -> list[Case]:
              lambda f: (f.finder(), f.finder_scroll())[-1],
              lambda f, value: ((after := f.finder_scroll()) is not None and value is not None and after > value,
                                {"before": value, "after": after})),
+        Case("caret_drift_validation", 'type "matrix typed"', "latency", None,
+             setup_caret_drift, check_caret_drift, "validation"),
+        Case("caret_drift_executor", 'type "matrix typed"', "latency", None,
+             setup_caret_drift, check_caret_drift, "executor"),
     ]
 
 
@@ -426,6 +496,11 @@ class RecordingDesktop(MacDesktop):
     """Production desktop that also records which targets each Jev request was offered."""
 
     offered: set[str]
+    drift_at = None
+    drift_hook = None
+    drift_applied = False
+    drift_error = None
+    dispatching = False
 
     def semantic_menu(self, goal, state):
         menu = super().semantic_menu(goal, state)
@@ -435,10 +510,39 @@ class RecordingDesktop(MacDesktop):
             self.offered.update(f"finder_{kind}" for kind in facts.get("workflow_controls", {}))
         return menu
 
+    def recheck(self, action, before):
+        """Inject fixture drift at the requested production boundary exactly once."""
 
-def stage(case: Case, offered: set[str], report: dict, oracle: bool) -> str:
+        phase = "executor" if self.dispatching else "validation"
+        if self.drift_at == phase and not self.drift_applied and action.kind == "TYPE_TEXT":
+            try:
+                self.drift_hook()
+            except Exception as error:
+                self.drift_error = str(error)
+                raise TextInputError("The harness could not establish caret drift; no input was sent.") from error
+            self.drift_applied = True
+        return super().recheck(action, before)
+
+    def execute(self, action):
+        """Identify rechecks inside the real native executor."""
+
+        self.dispatching = True
+        try:
+            super().execute(action)
+        finally:
+            self.dispatching = False
+
+
+def stage(case: Case, offered: set[str], report: dict, oracle: bool, *, drift_applied=False) -> str:
     """Name the first failing stage: discovery → selection → blocked → dispatch → verification."""
 
+    if case.drift_at:
+        if report.get("effect_sent") or report.get("verified"):
+            return "unsafe_dispatch"
+        if (drift_applied and oracle and report.get("outcome") == "failed"
+                and "caret changed" in report.get("reason", "")):
+            return "pass"
+        return "drift_not_proven"
     if oracle and report.get("verified"):
         return "pass"
     if oracle:
@@ -453,16 +557,98 @@ def stage(case: Case, offered: set[str], report: dict, oracle: bool) -> str:
     return "blocked"  # chosen, then stopped by safety, approval or fresh-target drift
 
 
+def synthesize(goal: str, directory: Path) -> Path:
+    """Create a disposable PCM recording for either voice path."""
+
+    audio = directory / "goal.wav"
+    subprocess.run(["say", "-o", str(audio), "--data-format=LEI16@16000", goal.replace('"', "")], check=True)
+    return audio
+
+
 def speak(goal: str, directory: Path, model) -> tuple[str, dict]:
-    """Synthesize the goal with macOS speech and transcribe it with the production ASR path."""
+    """Preserve the file-transcription path for comparing historical voice runs."""
 
     from scripts.test_stt_e2e import word_error
     from app.speech_runtime import transcribe_audio_file
 
-    audio = directory / "goal.wav"
-    subprocess.run(["say", "-o", str(audio), "--data-format=LEI16@16000", goal.replace('"', "")], check=True)
+    audio = synthesize(goal, directory)
     transcript = transcribe_audio_file(model, str(audio))
     return transcript, word_error(goal, transcript)
+
+
+class LivePlayback:
+    """Replay synthesized audio at microphone pace and optionally simulate the talk key."""
+
+    def __init__(self, audio):
+        self.audio = audio
+        self.thread = None
+        self.on_key = None
+        self.done = False
+        self.error = None
+        self.stopped = Event()
+
+    def microphone(self, rate, on_audio):
+        from mlx_audio.audio_io import read
+        import numpy as np
+
+        samples, _ = read(str(self.audio), dtype="float32", sample_rate=rate, nchannels=1)
+        samples = np.asarray(samples).reshape(-1)
+        speech = np.flatnonzero(np.abs(samples) >= 0.012)
+        if not speech.size:
+            raise RuntimeError("The synthesized utterance contained no audible speech.")
+        self.rate, self.on_audio = rate, on_audio
+        self.samples = samples[:speech[-1] + 1]
+        return self
+
+    def keys(self, on_key):
+        self.on_key = on_key
+        return SimpleNamespace(start=lambda: None, stop=lambda: None)
+
+    def start(self):
+        self.thread = Thread(target=self.play, name="matrix-audio-playback", daemon=True)
+        self.thread.start()
+
+    def play(self):
+        import numpy as np
+
+        try:
+            deadline = monotonic()
+            for samples in (self.samples, np.zeros(self.rate, dtype=np.float32)):
+                if self.on_key is not None:
+                    self.on_key("press" if samples is self.samples else "release")
+                for offset in range(0, samples.size, 1024):
+                    block = samples[offset:offset + 1024]
+                    deadline += block.size / self.rate
+                    if self.stopped.wait(max(0, deadline - monotonic())):
+                        return
+                    self.on_audio(block)
+        except Exception as error:
+            self.error = str(error)
+        finally:
+            self.done = True
+
+    def stop(self):
+        self.stopped.set()
+        if self.thread is not None:
+            self.thread.join()
+
+
+def live_voice(case, fixtures, model, desktop, approve, *, drafts, push_to_talk):
+    """Exercise the real voice CLI with paced audio, live Jev and real native dispatch."""
+
+    import io
+
+    path = fixtures.directory / "voice-report.json"
+    playback = LivePlayback(synthesize(case.goal, fixtures.directory))
+    flags = ["--listen", "--report", str(path)]
+    if drafts:
+        flags.append("--draft")
+    if push_to_talk:
+        flags.append("--push-to-talk")
+    _run_voice(_parser().parse_args(flags), desktop=desktop, client=None, output=io.StringIO(),
+               speech_model=model, audio_source_factory=playback.microphone,
+               key_source_factory=playback.keys if push_to_talk else None, approve_action=approve)
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def grant(action, approvals: list) -> bool:
@@ -477,16 +663,26 @@ def grant(action, approvals: list) -> bool:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--only", help="Comma-separated case names, or v0.1 / v0.2.")
+    parser.add_argument("--only", help="Comma-separated case names or scopes (v0.1, v0.2, latency).")
     parser.add_argument("--repeat", type=int, default=1, help="Runs per case, to expose flaky commands.")
-    parser.add_argument("--voice", action="store_true", help="Speak each goal with `say` and run the Nemotron transcript instead.")
+    voice_modes = parser.add_mutually_exclusive_group()
+    voice_modes.add_argument("--voice", action="store_true", help="Use file transcription for comparison to earlier runs.")
+    voice_modes.add_argument("--live-voice", action="store_true", help="Replay speech through the live listener and time speech to dispatch.")
+    parser.add_argument("--draft", action=argparse.BooleanOptionalAction, default=False, help="Enable draft decisions with --live-voice.")
+    parser.add_argument("--push-to-talk", action="store_true", help="Simulate holding Right Option during each --live-voice recording.")
     parser.add_argument("--report", type=Path, default=ROOT / ".build/native-matrix.json")
     parser.add_argument("--list", action="store_true", help="List cases and exit.")
     args = parser.parse_args(argv)
+    if (args.draft or args.push_to_talk) and not args.live_voice:
+        parser.error("--draft and --push-to-talk require --live-voice")
     selected = cases()
     if args.only:
         wanted = set(args.only.split(","))
         selected = [case for case in selected if case.name in wanted or case.scope in wanted]
+    if args.voice or args.live_voice:
+        selected = [case for case in selected if not case.drift_at]
+    if not selected or args.repeat < 1:
+        parser.error("Select at least one eligible case and a positive repeat count.")
     if args.list:
         for case in selected:
             print(f"{case.scope}  {case.name:<14} {case.goal}")
@@ -499,7 +695,7 @@ def main(argv=None) -> int:
         return 2
 
     model = None
-    if args.voice:
+    if args.voice or args.live_voice:
         from app.speech_model import load_speech_model
         model = load_speech_model()
     desktop = RecordingDesktop()
@@ -513,13 +709,39 @@ def main(argv=None) -> int:
                 try:
                     baseline = case.setup(fixtures)
                     goal = case.goal
-                    if model is not None:
+                    if args.voice:
                         goal, row["wer"] = speak(case.goal, fixtures.directory, model)
                         row["transcript"] = goal
                     desktop.offered, approvals, prepared = set(), [], frontmost()
-                    report = run_goal(goal, desktop, approve=lambda action: grant(action, approvals))
+                    desktop.drift_at, desktop.drift_applied = case.drift_at, False
+                    desktop.drift_error = None
+                    desktop.drift_hook = fixtures.move_fixture_caret if case.drift_at else None
+
+                    def approve(action):
+                        return grant(action, approvals)
+
+                    if args.live_voice:
+                        from scripts.test_stt_e2e import word_error
+
+                        session = live_voice(case, fixtures, model, desktop, approve,
+                                             drafts=args.draft, push_to_talk=args.push_to_talk)
+                        row["transcripts"] = session["transcripts"]
+                        row["drafts"] = session.get("drafts")
+                        if len(session["runs"]) != 1 or len(session["transcripts"]) != 1 or session.get("error"):
+                            row.update(stage="transcription", reason=session.get("error") or
+                                       "Expected one committed transcript and one command run.")
+                            continue
+                        report = session["runs"][0]
+                        row["transcript"] = report["transcript"]
+                        row["wer"] = word_error(case.goal, report["transcript"])
+                        row["draft"] = report.get("draft")
+                        row["speech_end_to_effect_ms"] = report.get("speech_end_to_effect_ms")
+                    else:
+                        report = run_goal(goal, desktop, approve=approve)
+                    if desktop.drift_error:
+                        raise RuntimeError(desktop.drift_error)
                     oracle, detail = wait_for(lambda: case.check(fixtures, baseline))
-                    result = stage(case, desktop.offered, report, oracle)
+                    result = stage(case, desktop.offered, report, oracle, drift_applied=desktop.drift_applied)
                     # Another app (often the user's own) took focus after setup; that is not a product stage.
                     if result != "pass" and report.get("observed_app") not in {None, prepared}:
                         result = "focus_stolen"
@@ -533,9 +755,11 @@ def main(argv=None) -> int:
                                timings_ms=report["timings_ms"])
                 except Exception as error:
                     row.update(stage="harness_error", reason=f"{type(error).__name__}: {error}")
-                row["seconds"] = round(perf_counter() - started, 1)
-                rows.append(row)
-                print(f"{row['stage']:<14} {case.scope}  {case.name:<14} {row.get('outcome', '')} {row.get('reason') or ''}", flush=True)
+                finally:
+                    if "stage" in row:
+                        row["seconds"] = round(perf_counter() - started, 1)
+                        rows.append(row)
+                        print(f"{row['stage']:<14} {case.scope}  {case.name:<14} {row.get('outcome', '')} {row.get('reason') or ''}", flush=True)
     except KeyboardInterrupt:
         print("Interrupted; saving the partial matrix.", file=sys.stderr)
     finally:
@@ -547,13 +771,18 @@ def main(argv=None) -> int:
         entry["passed"] += row["stage"] == "pass"
         entry["stages"][row["stage"]] = entry["stages"].get(row["stage"], 0) + 1
     regressions = sorted(name for name, entry in summary.items() if entry["scope"] == "v0.1" and entry["passed"] < entry["runs"])
-    _save_report(args.report, {"schema_version": 1, "mode": "voice" if args.voice else "text",
+    latency_regressions = sorted(name for name, entry in summary.items() if entry["scope"] == "latency" and entry["passed"] < entry["runs"])
+    _save_report(args.report, {"schema_version": 1, "mode": "live_voice" if args.live_voice else "voice" if args.voice else "text",
                                "python_executable": sys.executable, "summary": summary,
-                               "v01_regressions": regressions, "runs": rows})
+                               "v01_regressions": regressions, "latency_regressions": latency_regressions,
+                               **({"draft_enabled": args.draft, "push_to_talk": args.push_to_talk} if args.live_voice else {}),
+                               "runs": rows})
     print(f"\n{sum(e['passed'] for e in summary.values())}/{len(rows)} passed; report: {args.report}")
     if regressions:
         print(f"v0.1 regressions: {', '.join(regressions)}")
-    return 1 if regressions else 0
+    if latency_regressions:
+        print(f"Latency regressions: {', '.join(latency_regressions)}")
+    return 1 if regressions or latency_regressions else 0
 
 
 if __name__ == "__main__":

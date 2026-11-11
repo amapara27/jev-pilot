@@ -101,6 +101,15 @@ Enter/Tab/Shift-Tab/Escape use paired PID-directed Quartz events. Enter never ex
 permission preflight and a final PID/window/focus guard precede event dispatch.
 Notes selection identity is rechecked independently of editor identity.
 
+After Jev chooses, runtime validation and native execution refresh the facts
+that bind the action. App activation refreshes application identities, focused
+insertion rebuilds the pinned editor with the scanner's checks, and native
+window controls re-read their writable window attribute. Finder search and
+interactions still read sibling controls or ranges where those establish
+uniqueness or context. Notes retains selection and body discovery. Operations
+that depend on broader workflow identity keep a full observation. Verification
+continues to observe independently after dispatch.
+
 Directional scrolling sets the observed area's writable AX scrollbar to its current
 position plus a 60/200/600-pixel step, converted through the measured scrollable
 distance (single AXContents size minus the area's size); areas without that geometry
@@ -423,22 +432,36 @@ MLX-Audio's `create_streaming_session()` interface, not its separate speaker-
 diarization session.
 
 The PortAudio callback copies mono float32 frames into a bounded queue and does
-no model work. A single ordered consumer feeds audio and advances the decoder;
-partials are display-only by default. A small RMS gate commits an utterance after sustained
+no model work. A single ordered consumer feeds audio and advances the decoder.
+A small RMS gate commits an utterance after sustained
 silence, flushes one final result, and creates the next decoder session while
 capture continues. Input and goal queues are bounded; overflow is an explicit
 error, never silent data loss. Final transcripts enter a five-goal FIFO. One
-execution worker calls the existing `run_goal()` on the main/AppKit thread
-with transcript text only; desktop state is observed fresh when a queued goal
-starts. ASR decoding runs alongside it. A non-success outcome discards queued
+execution worker calls `run_goal()` on the main/AppKit thread. ASR decoding
+runs alongside it. A non-success outcome discards queued
 follow-ups and records them as not run; listening continues for new goals. Stop/Ctrl-C discards the
 current partial utterance and cancels the active run at its next pre-effect
 boundary; already-sent native effects cannot be undone.
 
 `--silence-ms` controls the local endpointing threshold. This is a latency/noise
 tradeoff, not a learned VAD. The Nemotron session uses its automatic language
-selection. The user reports live speech testing; quantified WER and latency remain
-separate acceptance evidence. Offline checks fake model/audio boundaries.
+selection. Voice runs record the time from the first quiet block or talk-key
+release to the first completed dispatch.
+
+`--draft` lets an idle listener observe on the main thread after 150 ms of
+quiet and ask Jev in a single background worker. The listener can issue up to
+two drafts per utterance. Only a draft for the same utterance and exact final
+text can supply the first decision, and only within three seconds. A stale
+target restarts the first decision before dispatch. Approval, final target
+guards and verification still apply. Draft requests are recorded with hits,
+misses and wasted calls. `--no-draft` disables this path.
+
+`--push-to-talk` uses a listen-only Quartz tap with Input Monitoring permission.
+Right Option transitions share the audio queue so a chord cancellation cannot
+commit the in-progress utterance. Capture retains 300 ms of audio before the
+press and feeds up to 150 ms after release. A hold must contain speech energy
+to commit. Push-to-talk and draft decisions can run together. The early app
+clause experiment is separate from both.
 
 `--listen --stream-prefixes` enables `StreamingCommands`: one explicit known-app
 opening/focusing clause followed by a connector must remain unchanged for 400 ms.

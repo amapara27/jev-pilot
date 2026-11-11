@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, wait
+from dataclasses import dataclass
 from threading import Event
 import re
 import sys
@@ -10,7 +12,7 @@ from typing import Callable
 
 from .decision import JevCallError, select_action
 from .config import ConfigurationError, load_api_key
-from .models import ActionCandidate
+from .models import ActionCandidate, JevDecision
 from .desktop import DesktopError, DesktopState
 from .safety import blocked_goal, disposition
 from .verification import verify_action, editor_readiness, note_body, same_created_note
@@ -21,6 +23,73 @@ from .interactions import QUOTES, command_actions, action_operation
 
 
 MAX_STEPS = 4
+DRAFT_MAX_AGE = 3
+
+
+@dataclass(frozen=True)
+class DraftDecision:
+    """The first observation and provider request for one possible final transcript."""
+
+    goal: str
+    before: DesktopState
+    menu: SemanticMenu
+    future: Future[JevDecision]
+    created_at: float
+
+
+def _goal_commands(goal, required):
+    """Keep explicit keyboard commands and any insertion in spoken order."""
+
+    commands = command_actions(goal)
+    ordered = command_actions(goal, with_positions=True)
+    masked = re.sub(QUOTES, lambda match: ' ' * len(match.group()), goal)
+    typing = re.search(r'\b(?:type|write|dictate|insert)\s+', masked, re.I)
+    if commands and typing and 'TYPE_TEXT' in required:
+        ordered.append((typing.start(), 'TYPE_TEXT'))
+    return commands, [command for _, command in sorted(ordered)], typing
+
+
+def _decision_inputs(before, menu, required, remaining, ordered, inserted_field=None):
+    """Apply the same next-command filter and provider facts to drafts and live decisions."""
+
+    state = before.provider_state()
+    workflow = bool(required - {"TYPE_TEXT"})
+    state.update(verified_steps=[], pending_payload_id=None, recent_actions=[],
+                 required_operations=sorted(required) if workflow else [],
+                 remaining_operations=sorted(remaining) if workflow else [])
+    if ordered is not None:
+        next_command = ordered[0] if ordered else None
+        menu = SemanticMenu(menu.goal, {
+            key: facts for key, facts in menu.targets.items()
+            if facts.get('scope') != 'interaction' or facts.get('command') == next_command
+            and (next_command != 'enter' or inserted_field is None or facts.get('field_id') == inserted_field.id)
+        }, menu.payloads, menu.intent)
+        state['next_command'] = next_command
+        state['remaining_operations'] = sorted(remaining | {
+            'TYPE_TEXT' if item == 'TYPE_TEXT' else action_operation(item) for item in ordered})
+    return menu, state
+
+
+def _select(goal, state, menu, model, client):
+    """Resolve a decision with the same configuration in both call paths."""
+
+    return select_action(goal, state, menu, api_key=load_api_key() if client is None else None,
+                         model=model, client=client)
+
+
+def prepare_draft(goal, desktop, submit, *, model, client):
+    """Observe on the caller's AppKit thread and submit only the provider work."""
+
+    if not goal.strip() or blocked_goal(goal):
+        return None
+    created_at = monotonic()
+    required = required_workflow_operations(goal)
+    desktop.interaction_commands, ordered, _ = _goal_commands(goal, required)
+    before = desktop.snapshot()
+    if required - WEB_OPERATIONS and not before.ax_trusted:
+        return None
+    menu, state = _decision_inputs(before, desktop.semantic_menu(goal, before), required, required, ordered or None)
+    return DraftDecision(goal, before, menu, submit(_select, goal, state, menu, model, client), created_at)
 
 
 def run_goal(
@@ -36,6 +105,8 @@ def run_goal(
     intended_bundle: str | None = None,
     stream_app: str | None = None,
     auto_approve_basic: bool = False,
+    draft: DraftDecision | None = None,
+    speech_ended_at: float | None = None,
 ) -> dict[str, object]:
     """Let Jev select each prerequisite; never repeat a sent or uncertain insertion."""
 
@@ -55,14 +126,8 @@ def run_goal(
     workflow = bool(required - {"TYPE_TEXT"})
     limit = 8 if workflow else MAX_STEPS
     verified_operations = set()
-    commands = command_actions(goal)
+    commands, ordered, typing = _goal_commands(goal, required)
     desktop.interaction_commands = commands
-    ordered = command_actions(goal, with_positions=True)
-    masked = re.sub(QUOTES, lambda m: ' ' * len(m.group()), goal)
-    typing = re.search(r'\b(?:type|write|dictate|insert)\s+', masked, re.I)
-    if commands and typing and 'TYPE_TEXT' in required:
-        ordered.append((typing.start(), 'TYPE_TEXT'))
-    ordered = [command for _, command in sorted(ordered)]
     command_index = 0
 
     def timing(name: str) -> None:
@@ -90,11 +155,40 @@ def run_goal(
             report["reason"] = "This request is outside the local safety boundary."
             return report
 
-        for index in range(limit):
+        index = -1
+        while index + 1 < limit:
+            index += 1
             if cancellation_requested():
                 return report
+            using_draft = index == 0 and draft is not None
+            if using_draft:
+                wait_started = monotonic()
+                status = 'hit'
+                if draft.goal != goal:
+                    status = 'miss_text'
+                elif intended_bundle is not None or stream_app is not None or allowed_operations is not None:
+                    status = 'none'
+                while not draft.future.done() and not cancellation_requested():
+                    # A client supplied by the caller may not support overlapping requests.
+                    wait((draft.future,), timeout=0.05)
+                if cancellation_requested():
+                    return report
+                if status == 'hit':
+                    if monotonic() - draft.created_at >= DRAFT_MAX_AGE:
+                        status = 'stale_fallback'
+                    else:
+                        try:
+                            decision = draft.future.result()
+                            if decision.selected_candidate is None:
+                                status = 'stale_fallback'
+                        except Exception:
+                            status = 'stale_fallback'
+                report['draft'] = {'status': status, 'wait_ms': round((monotonic() - wait_started) * 1_000)}
+                using_draft = status == 'hit'
+                if not using_draft:
+                    draft = None
             report["verified"] = False
-            before: DesktopState = desktop.snapshot()
+            before: DesktopState = draft.before if using_draft else desktop.snapshot()
             if inserted_field is not None and command_index < len(ordered) and ordered[command_index] == 'enter':
                 current = next((item for item in before.text_fields if item.id == inserted_field.id), None)
                 if not current or not desktop.text.same_target(inserted_field, current, typing=True):
@@ -118,7 +212,7 @@ def run_goal(
                     cancel_event.wait(0.05) if cancel_event is not None else sleep(0.05)
                     before = desktop.snapshot()
                 timing('editor_readiness')
-            menu = desktop.semantic_menu(goal, before)
+            menu = draft.menu if using_draft else desktop.semantic_menu(goal, before)
             menu = SemanticMenu(goal, {key: facts for key, facts in menu.targets.items() if key not in pressed_controls}, menu.payloads, menu.intent)
             if prepared_field is not None:
                 current = next((item for item in before.text_fields if item.id == prepared_field.id), None)
@@ -133,11 +227,10 @@ def run_goal(
                 body = note_body(before)
                 menu = SemanticMenu(goal, {key: facts for key, facts in menu.targets.items()
                                           if key in {"none", body.id}}, menu.payloads, menu.intent)
-            if ordered:
-                next_command = ordered[command_index] if command_index < len(ordered) else None
-                menu = SemanticMenu(goal, {key: facts for key, facts in menu.targets.items()
-                                          if facts.get('scope') != 'interaction' or facts.get('command') == next_command
-                                          and (next_command != 'enter' or inserted_field is None or facts.get('field_id') == inserted_field.id)}, menu.payloads, menu.intent)
+            next_command = ordered[command_index] if command_index < len(ordered) else None
+            if not using_draft:
+                menu, state = _decision_inputs(before, menu, required, required - verified_operations,
+                                               ordered[command_index:] if ordered else None, inserted_field)
             report["observed_app"] = before.active.name if before.active else None
             report["accessibility_trusted"] = before.ax_trusted
             report["editor_readiness"] = editor_readiness(before)
@@ -152,25 +245,16 @@ def run_goal(
                     "No Jev request or desktop effect was sent."
                 )
                 return report
-            state = before.provider_state()
-            # Prior verified operations help Jev advance rather than repeat preparation.
-            state["verified_steps"] = [item["decision"]["semantic"]["operation"] for item in report["steps"] if item["verified"]]
-            state["pending_payload_id"] = pending_payload_id
-            state["required_operations"] = sorted(required) if workflow else []
-            state["remaining_operations"] = sorted(required - verified_operations) if workflow else []
-            if ordered:
-                state['next_command'] = next_command
-                state['remaining_operations'] = sorted((required - verified_operations) | {
-                    'TYPE_TEXT' if item == 'TYPE_TEXT' else action_operation(item) for item in ordered[command_index:]})
-            state["recent_actions"] = [{"operation": item["decision"]["semantic"]["operation"],
-                                        "target_id": item["decision"]["semantic"]["target_id"],
-                                        "effect_sent": item["effect_sent"], "verified": item["verified"],
-                                        "outcome": item.get("outcome")}
-                                       for item in report["steps"][-8:]]
-            decision = select_action(
-                goal, state, menu, api_key=load_api_key() if client is None else None,
-                model=model, client=client,
-            )
+            if not using_draft:
+                # Prior verified operations help Jev advance through preparation.
+                state["verified_steps"] = [item["decision"]["semantic"]["operation"] for item in report["steps"] if item["verified"]]
+                state["pending_payload_id"] = pending_payload_id
+                state["recent_actions"] = [{"operation": item["decision"]["semantic"]["operation"],
+                                            "target_id": item["decision"]["semantic"]["target_id"],
+                                            "effect_sent": item["effect_sent"], "verified": item["verified"],
+                                            "outcome": item.get("outcome")}
+                                           for item in report["steps"][-8:]]
+                decision = _select(goal, state, menu, model, client)
             action = decision.selected_candidate
             report["decision"] = decision.to_dict()
             step = {"index": index + 1, "decision": decision.to_dict(), "effect_sent": False, "verified": False}
@@ -249,7 +333,8 @@ def run_goal(
             def validate_target() -> DesktopState:
                 """Bind decision and approval to the same live application/editor facts."""
 
-                fresh = desktop.snapshot()
+                fresh = (desktop.snapshot() if prepared_field is not None or created_note is not None
+                         else desktop.recheck(action, before))
                 if prepared_field is not None:
                     current = next((item for item in fresh.text_fields if item.id == prepared_field.id), None)
                     if not current or not desktop.text.same_target(prepared_field, current, typing=False):
@@ -258,13 +343,26 @@ def run_goal(
                     raise DesktopError("The newly created note changed while deciding or approving; no effect was sent.")
                 desktop.validate_action(action, before, fresh)
                 target_id = decision.semantic["target_id"]
-                if desktop.semantic_menu(goal, fresh).targets.get(target_id) != decision.semantic["target"]:
+                fresh_menu = desktop.semantic_menu(goal, fresh)
+                if (fresh_menu.targets.get(target_id) != decision.semantic["target"]
+                        or using_draft and fresh_menu.intent != menu.intent):
                     raise DesktopError("The selected target is no longer a current action.")
                 return fresh
 
             try:
                 fresh = validate_target()
-            except DesktopError:
+            except (DesktopError, TextInputError) as error:
+                if using_draft:
+                    report['draft']['status'] = 'stale_fallback'
+                    report['steps'].pop()
+                    report.pop('decision')
+                    pending_payload_id = None
+                    draft = None
+                    index -= 1
+                    timing("recovery")
+                    continue
+                if not isinstance(error, DesktopError) or action.kind not in {"CREATE_NOTE", "PREPARE_SEARCH", "PRESS_CONTROL"} or recoveries >= 2:
+                    raise
                 fresh = desktop.snapshot()
                 original = next((item for item in before.workflow_targets if item.id == action.parameters.get("element_id")), None)
                 replacement = next((item for item in fresh.workflow_targets if original and item.kind == original.kind
@@ -272,7 +370,7 @@ def run_goal(
                                     and desktop.text.equal(item.window, original.window)
                                     and not desktop.text.equal(item.element, original.element)
                                     and item.selected == original.selected and item.expanded == original.expanded), None)
-                if action.kind not in {"CREATE_NOTE", "PREPARE_SEARCH", "PRESS_CONTROL"} or before.active != fresh.active or replacement is None or recoveries >= 2:
+                if before.active != fresh.active or replacement is None:
                     raise
                 recoveries += 1
                 step.update(outcome="reobserve", reason="The control changed before dispatch; asking Jev against fresh targets.")
@@ -306,6 +404,8 @@ def run_goal(
             report["effect_sent"] = step["effect_sent"] = True
             report["verified"] = False
             desktop.execute(action)
+            if speech_ended_at is not None and "speech_end_to_effect_ms" not in report:
+                report["speech_end_to_effect_ms"] = round((monotonic() - speech_ended_at) * 1_000)
             timing("execution")
             observations, diagnostics = [], {}
             verified = verify_action(desktop, action, fresh, observations=observations, diagnostics=diagnostics, cancel_event=cancel_event)

@@ -1,7 +1,7 @@
 """Ground explicit keyboard commands and scrollbar positions in current native context."""
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 import re
 from time import monotonic
@@ -250,13 +250,10 @@ class NativeInteractions:
         terminal = state.active.bundle_id in {'com.apple.Terminal', 'com.googlecode.iterm2'}
         self.diagnostics['window_control_checks'] = []
         for command, attribute in WINDOW_COMMANDS.items():
-            error, value = ax.AXUIElementCopyAttributeValue(window, attribute, None)
-            readable = error == 0 and isinstance(value, (bool, int)) and value in (0, 1)
-            writable = text.settable(window, attribute)
-            self.diagnostics['window_control_checks'].append({'command': command, 'attribute_ax_error': int(error),
-                                                              'readable_boolean': readable, 'writable': writable})
-            if readable and writable:
-                add(command, window, window_attribute=attribute, window_value=bool(value))
+            value, check = self.window_control(window, attribute)
+            self.diagnostics['window_control_checks'].append({'command': command, **check})
+            if value is not None:
+                add(command, window, window_attribute=attribute, window_value=value)
         if editor and not terminal:
             if editor.value and text.settable(editor.element, 'AXSelectedTextRange'):
                 add('select_all', editor.element)
@@ -355,6 +352,27 @@ class NativeInteractions:
                             add('scroll_top' if direction == 'up' else 'scroll_bottom', area, bar=bar, value=value, minimum=minimum, maximum=maximum, extent=extent, area_label=label)
         self.previous = tuple(candidates)
         return self.previous
+
+    def window_control(self, window, attribute):
+        """Read a writable boolean window capability for discovery and dispatch."""
+
+        error, value = self.text.ax.AXUIElementCopyAttributeValue(window, attribute, None)
+        readable = error == 0 and isinstance(value, (bool, int)) and value in (0, 1)
+        writable = self.text.settable(window, attribute)
+        return (bool(value) if readable and writable else None,
+                {'attribute_ax_error': int(error), 'readable_boolean': readable, 'writable': writable})
+
+    def recheck(self, target, state, application, window, commands):
+        """Re-read a window control directly or rebuild the command's sibling-dependent context."""
+
+        if target.window_attribute:
+            self.text.scan_deadline = monotonic() + 0.5
+            if not self.text.safe_ancestry(window):
+                return ()
+            value, _ = self.window_control(window, target.window_attribute)
+            return (replace(target, window=window, window_value=value),) if value is not None else ()
+        editor = self.text.recheck(target.editor, application, window) if target.editor else None
+        return self.scan(replace(state, text_fields=(editor,) if editor else ()), application, window, commands)
 
     def scrollbar(self, area, attribute):
         """Accept one native axis scrollbar, including child-only WebKit exposure."""
