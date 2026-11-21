@@ -138,6 +138,55 @@ class SpeechToActionEndToEnd(unittest.TestCase):
         self.assertEqual(report["transcripts"], ["Switch to Terminal"])
         self.assertEqual(report["runs"], [])
 
+        from app.voice_status import VoiceStatus
+        statuses = []
+
+        class Status(VoiceStatus):
+            def __init__(self, **kwargs):
+                super().__init__(enabled=False)
+                self.closed = False
+                statuses.append(self)
+
+            def close(self):
+                self.closed = True
+                super().close()
+
+        class DelayedSession(FakeStreamingSession):
+            def step(self, **kwargs):
+                if self.closed:
+                    self.done = True
+                    return ['Switch to Terminal']
+                return []
+
+        class DelayedModel(FakeSpeechModel):
+            def create_streaming_session(self, **kwargs):
+                session = DelayedSession()
+                self.sessions.append(session)
+                return session
+
+        class ShortMicrophone(FakeMicrophone):
+            def start(self):
+                # A long idle period must stay bounded; short speech may emit only after close().
+                self.callback(np.zeros(10_000, dtype=np.float32))
+                self.callback(np.full(80, 0.5, dtype=np.float32))
+                self.done = True
+
+        for mode in ('--transcribe-only', '--listen'):
+            model, desktop, client = DelayedModel(), FakeDesktop(), FakeJev()
+            with patch('app.cli.VoiceStatus', Status):
+                status = main([mode, '--yes', '--report', str(artifact)], output=io.StringIO(),
+                              desktop=desktop, client=client, speech_model=model,
+                              audio_source_factory=ShortMicrophone)
+            report = json.loads(artifact.read_text())
+            self.assertEqual(status, 0, report)
+            self.assertEqual(report['transcripts'], ['Switch to Terminal'])
+            self.assertEqual(sum(block.size for block in model.sessions[0].fed), 380)
+            np.testing.assert_array_equal(model.sessions[0].fed[-1], np.full(80, 0.5, dtype=np.float32))
+            self.assertEqual(desktop.effects, int(mode == '--listen'))
+            self.assertEqual(client.calls, int(mode == '--listen'))
+            self.assertEqual(statuses[-1].state, 'completed')
+            self.assertTrue(statuses[-1].closed)
+
     def test_draft_reuses_only_exact_final_text_and_reobserves_stale_caret(self):
         """Use real decoding callbacks and native routing, with barriers around the provider."""
 

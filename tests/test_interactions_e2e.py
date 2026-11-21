@@ -111,6 +111,54 @@ class InputActionsEndToEnd(unittest.TestCase):
                 after_call=(lambda: ax.editor.attrs.update(AXValue='changed')) if drift else None))
             self.assertFalse(result['effect_sent'], result)
 
+        from app.verification import verify_action
+        records = []
+        for command, value, selection, expected, caret in [
+            ('delete_last_word', 'hello world', (11, 0), 'hello ', (6, 0)),
+            ('delete_last_word', 'hello world   ', (14, 0), 'hello ', (6, 0)),
+            ('delete_last_word', 'hi 🌍 café! tail', (11, 0), 'hi 🌍  tail', (6, 0)),
+            ('new_paragraph', 'hello tail', (5, 0), 'hello\n\n tail', (7, 0)),
+            ('new_paragraph', 'hello tail', (0, 5), '\n\n tail', (2, 0)),
+        ]:
+            for failure in ('none', 'caret_drift', 'ignored', 'setter_error'):
+                with self.subTest(command=command, value=value, failure=failure):
+                    desktop, ax, _, _ = input_setup(value=value, selection=selection)
+                    ax.ignore_insertion = failure == 'ignored'
+                    ax.setter_error = failure == 'setter_error'
+                    goal = 'delete the last word' if command == 'delete_last_word' else 'new paragraph'
+                    client = InteractionJev(plan=[('KEYBOARD_ACTION', 'action:' + command, 'none')],
+                                            after_call=(lambda: ax.editor.attrs.update(AXSelectedTextRange=(0, 0)))
+                                            if failure == 'caret_drift' else None)
+                    with patch('app.runtime.verify_action', side_effect=lambda *a, **kw: verify_action(*a, timeout_seconds=0, **kw)):
+                        result = run_goal(goal, desktop, client=client)
+                    if failure == 'none':
+                        self.assertEqual(result['outcome'], 'completed', result)
+                        self.assertEqual(ax.editor.attrs['AXValue'], expected)
+                        self.assertEqual(ax.editor.attrs['AXSelectedTextRange'], caret)
+                    else:
+                        self.assertNotEqual(result['outcome'], 'completed', result)
+                        if failure in {'caret_drift', 'ignored'}:
+                            self.assertEqual(ax.editor.attrs['AXValue'], value)
+                        if failure == 'caret_drift':
+                            self.assertEqual(ax.effects, [])
+                    self.assertLessEqual(sum(attribute == 'AXSelectedText' for attribute, _ in ax.effects), 1)
+                    records.append(result)
+        for value, selection, writable, role in [('', (0, 0), True, 'AXTextArea'),
+                                                 ('word', (0, 0), True, 'AXTextArea'),
+                                                 ('word', (0, 4), True, 'AXTextArea'),
+                                                 ('word', (4, 0), False, 'AXTextArea')]:
+            desktop, ax, _, _ = input_setup(value=value, selection=selection, selected_writable=writable)
+            result = run_goal('delete last word', desktop, client=InteractionJev(plan=[('KEYBOARD_ACTION', 'action:delete_last_word', 'none')]))
+            self.assertFalse(result['effect_sent'], result)
+            self.assertEqual(ax.effects, [])
+        for goal in ('delete the file', 'delete last word and delete all files', 'delete last word and trash Notes'):
+            desktop, ax, _, _ = input_setup()
+            client = InteractionJev(plan=[])
+            result = run_goal(goal, desktop, client=client)
+            self.assertEqual(result['outcome'], 'blocked')
+            self.assertEqual(client.calls, [])
+        Path('.build/voice-editing-e2e.json').write_text(json.dumps(records, indent=2))
+
     def test_scroll_requires_observed_range_and_verifies_movement(self):
         desktop, ax, _, _ = input_setup()
         ax.kAXValueCGPointType = 1

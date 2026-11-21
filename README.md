@@ -15,6 +15,8 @@ This early macOS command-line release is designed for short, explicit commands. 
 - Dictate into the focused text field and explicitly ask to press Enter.
 - Create a note in Apple Notes or a document in TextEdit, then dictate its contents.
 - Copy, cut, paste, undo, and redo in text fields.
+- Delete the word before the caret, insert a new paragraph, and select all text.
+- Click uniquely named Safari links and buttons; duplicate names need a more specific request.
 - Open, switch, and close browser tabs; go back or forward; reload; zoom in, out, or reset.
 - Scroll up or down, or jump to the top or bottom of a page.
 - Search in Finder and scroll Finder's file list.
@@ -93,6 +95,8 @@ To control when an utterance starts and ends, run `jvpilot --listen --push-to-ta
 
 `jvpilot --listen --draft` lets Jev start choosing an action during a pause. The listener waits for the exact final transcript and rechecks the target before acting. Use `--no-draft` to compare with decisions made after transcription.
 
+A floating panel shows the transcript, action progress, result, and approval state without taking keyboard focus. Use `--no-status` for Terminal-only feedback.
+
 If a `Y / n` prompt appears, enter `y` to approve or `n` to decline. After a command fails or is declined, the listener normally stays active; speak a fresh command after the result. Queued follow-up commands behind a failure are discarded.
 
 Stop by saying **“stop listening,” “stop pilot,”** or **“quit pilot.”** You can also press **Control-C** in Terminal. Stopping cancels pending work before its next action; it cannot undo an action already sent. Run the start command again for a new session.
@@ -113,6 +117,8 @@ Stop by saying **“stop listening,” “stop pilot,”** or **“quit pilot.�
 | Create and fill a note | “create a new note in Notes and type hello world” |
 | Create and fill a document | “create a new document in TextEdit and type hello world” |
 | Select text | “select all” |
+| Edit text by voice | “delete the last word” · “new paragraph” |
+| Click in Safari | “click Downloads” · “click Show details” |
 | Edit with the clipboard | “copy” · “cut” · “paste” |
 | Undo or redo | “undo” · “redo” |
 | Browser tabs | “open a new tab” · “go to the next tab” · “go to the previous tab” · “switch to the GitHub tab” · “close this tab” |
@@ -126,6 +132,8 @@ Stop by saying **“stop listening,” “stop pilot,”** or **“quit pilot.�
 
 Text commands need an editable field; select-all also needs existing text. Typing inserts at the caret or replaces selected text. “Maximize” means enter full screen. Use short, explicit requests and name the app for document workflows. If a command is misheard, wait for its result and speak a fresh instruction; completed actions are not automatically undone.
 
+“Delete the last word” removes the word immediately before a collapsed caret, including trailing spaces, while preserving text after it. It requires native text-replacement and selection support. “New paragraph” inserts two line breaks in a writable multiline editor. Named Safari clicks require accessible English labels and a complete bounded scan; duplicate or unavailable targets stop without clicking. Link redirects may remain unverified.
+
 ## How it works
 
 <p align="center">
@@ -138,6 +146,20 @@ Text commands need an editable field; select-all also needs existing text. Typin
 4. **Check and act:** local safety rules can block the action or ask for your approval. Jev Pilot then performs the action and confirms that the app actually changed before taking another step.
 
 Nothing is retried blindly. If a result can't be confirmed, Jev Pilot stops and tells you. For module-level detail, see [the architecture guide](docs/ARCHITECTURE.md).
+
+## Cost
+
+Jev Pilot itself is free, and speech transcription on your Mac costs nothing. The only cost is TypeSafe's charge for Jev decisions, which is based on input tokens (the text sent to Jev).
+
+In a 31-command test session, each command made 2–4 Jev calls and used about 9,800 input tokens on average. Simple commands such as "Open Notes" used about 8,000, and two-step commands such as "create a new document in TextEdit and type…" used about 18,500. At TypeSafe's listed rate of about $0.042 per million input tokens, with output tokens free, that works out to:
+
+| Usage | Approximate Jev cost |
+| --- | --- |
+| One command | $0.0004 (about 2,400 commands per dollar) |
+| 100 commands a day | $1.25 a month |
+| 500 commands a day | $6 a month |
+
+For comparison, paid plans for HeyClicky, a subscription desktop assistant, cost $20–100 a month as of November 2026. Those plans include features Jev Pilot doesn't have, such as answering questions about your screen. TypeSafe's rates can change, so check your TypeSafe account for current pricing. Each session report records the input and output tokens for every Jev call, so you can check your own usage.
 
 ## Limits and privacy
 
@@ -210,6 +232,7 @@ python -m scripts.native_matrix --list          # show cases
 python -m scripts.native_matrix                 # run every case once
 python -m scripts.native_matrix --only v0.2 --repeat 3
 python -m scripts.native_matrix --only latency
+python -m scripts.native_matrix --only v0.3     # new editing and named-click checks
 python -m scripts.native_matrix --voice         # file transcription for historical comparisons
 python -m scripts.native_matrix --live-voice --draft
 python -m scripts.native_matrix --live-voice --push-to-talk
@@ -218,3 +241,5 @@ python -m scripts.native_matrix --live-voice --push-to-talk
 The matrix opens its own disposable TextEdit document, Safari window and Finder folder, then checks results independently using AppleScript, page events and Accessibility reads. The latency cases move the fixture caret after Jev chooses an insertion and verify that the document stays untouched. Live voice replays synthesized speech at microphone pace and measures from the speech boundary or simulated key release to dispatch completion. The matrix saves results to `.build/native-matrix.json` and exits nonzero if a v0.1 command or latency regression case fails. Leave the Mac alone while it runs, because it moves focus between apps and overwrites your clipboard.
 
 See [the architecture guide](docs/ARCHITECTURE.md) for implementation details. Restart the listener after changing code.
+
+To compare a recording of your voice through file transcription, live capture, and simulated push-to-talk, use `scripts/test_stt_e2e.py` with the same `JEV_STT_AUDIO` and `JEV_STT_EXPECTED` environment values. Set `JEV_STT_MODE` to `file`, `live`, or `push_to_talk`, then run `python -m scripts.test_stt_e2e`. This calls no Jev and performs no desktop actions; its latest result is `.build/stt-e2e.json`. Simulated push-to-talk does not test your physical key or microphone.

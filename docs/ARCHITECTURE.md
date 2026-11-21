@@ -1,5 +1,13 @@
 # Jev Pilot architecture
 
+## Everyday voice controls
+
+`NativeInteractions` offers `delete_last_word` and `new_paragraph` through the existing Jev-selected KEYBOARD_ACTION path. Word deletion computes a local UTF-16 range before a collapsed caret, proves the selected range and unchanged editor value before replacing it, and verifies exact remaining text/caret. Paragraph insertion uses the guarded native text writer. Only a standalone delete-last-word request is exempt from the destructive-goal block.
+
+Explicit click goals enable bounded Safari web-control discovery in `NativeWorkflows`. Links retain validated HTTP destinations locally; only labels and capabilities enter the decision request. Unique named controls are offered to Jev; duplicates, incomplete scans, target/page drift and unsafe destinations refuse dispatch. Navigation, expanded state or concrete editor/document changes verify clicks; focus alone never does. A single named click completes after its first verified effect.
+
+Voice capture bounds idle preroll and finalizes voiced input even if the decoder emits no partial text before capture ends. `VoiceStatus` coalesces decoder-thread updates into a nonactivating AppKit panel rendered on the main thread. Approval and active-action states take precedence over incoming partials. `--no-status` disables the panel. Native matrix cases cover editing, named clicks and duplicate refusal; recorded-audio checks support file/live/simulated-PTT comparison without desktop effects.
+
 The active runtime is `jvpilot` (also `python -m app`): typed goals or continuous local Nemotron
 speech, one factorized Jev request per step, bounded typing preparation, native
 app/editor effects, and verified reports. The earlier Swift app was removed (see git history before cf6079a).

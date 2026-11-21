@@ -140,6 +140,7 @@ def run_live_asr(
     on_partial: Callable[[str], None] = lambda _: None,
     on_pause: Callable[[str], None] | None = None,
     on_boundary: Callable[[float], None] = lambda _: None,
+    on_state: Callable[[str, str], None] = lambda *_: None,
     stop_event: Event | None = None,
     audio_source_factory: Callable[[int, Callable[[object], None]], object] = SoundDeviceAudioSource,
     key_source_factory: Callable[[Callable[[str], None]], object] | None = None,
@@ -204,6 +205,7 @@ def run_live_asr(
         """Finalize once and publish the speech boundary with the exact transcript."""
 
         nonlocal utterances
+        on_state('processing', 'Finishing transcript…')
         on_boundary(ended_at)
         session.close()
         final_text = text
@@ -215,6 +217,8 @@ def run_live_asr(
         if not stopping.is_set() and final_text:
             on_final(final_text)
             utterances += 1
+        elif not stopping.is_set():
+            on_state('unheard', 'No words recognized. Try again, or lower --speech-threshold for quiet speech.')
         if not getattr(session, "done", False):
             session.cancel()
         reset_session()
@@ -292,12 +296,14 @@ def run_live_asr(
                     if release_at is not None:
                         finish_release()
                     pressed, cancelled = True, False
+                    on_state('listening', 'Listening — release Right Option to finish')
                     for block in preroll:
                         feed(block, captured_at, allow_pause=False)
                     preroll.clear()
                     preroll_samples = 0
                 elif item == "cancel" and pressed and not cancelled:
                     cancelled = True
+                    on_state('cancelled', 'Shortcut detected — utterance cancelled')
                     on_boundary(captured_at)
                     session.cancel()
                     reset_session()
@@ -309,6 +315,15 @@ def run_live_asr(
                 continue
 
             if keys is None:
+                if not speaking:
+                    if _rms(item) < speech_threshold:
+                        buffer_preroll(item)
+                        continue
+                    on_state('listening', 'Listening…')
+                    for block in preroll:
+                        feed(block, captured_at, allow_pause=False)
+                    preroll.clear()
+                    preroll_samples = 0
                 feed(item, captured_at)
                 last_audio = captured_at
                 if quiet_samples * 1_000 >= eou_silence_ms * sample_rate:
@@ -331,7 +346,7 @@ def run_live_asr(
             session.cancel()
         elif keys is not None and release_at is not None:
             finish_release()
-        elif keys is None and speaking and text.strip():
+        elif keys is None and speaking:
             finish_utterance(speech_end if quiet_samples else last_audio)
         return utterances
     finally:

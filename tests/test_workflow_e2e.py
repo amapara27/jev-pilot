@@ -367,6 +367,71 @@ class WorkflowEndToEnd(unittest.TestCase):
         artifact = Path(__file__).resolve().parents[1] / ".build/workflow-recovery-e2e.json"
         artifact.write_text(json.dumps({"evidence": "offline", "scenarios": cases}, indent=2) + "\n")
 
+        from app.verification import verify_action
+        web_cases = {}
+        for mode in ('link', 'button', 'duplicate', 'partial_duplicate', 'hidden', 'disabled', 'unsafe_url',
+                     'destination_drift', 'page_drift', 'ignored', 'wrong_destination', 'focus_only', 'scan_limit'):
+            desktop, ax = setup('com.apple.Safari')
+            destination = 'https://example.com/downloads'
+            ax.window.attrs['AXURL'] = 'https://example.com/'
+            page = Node(AXRole='AXWebArea', AXParent=ax.window)
+            link = Node(AXRole='AXButton' if mode == 'button' else 'AXLink', AXTitle='Downloads',
+                        AXEnabled=mode != 'disabled', AXParent=page)
+            if mode == 'button':
+                link.attrs['AXExpanded'] = False
+            else:
+                link.attrs['AXURL'] = 'javascript:alert(1)' if mode == 'unsafe_url' else destination
+            page.attrs['AXChildren'] = [link]
+            ax.window.attrs['AXChildren'].append(page)
+            if mode in {'duplicate', 'partial_duplicate'}:
+                duplicate = Node(**link.attrs)
+                if mode == 'partial_duplicate':
+                    link.attrs['AXTitle'], duplicate.attrs['AXTitle'] = 'Downloads for Mac', 'Downloads for Windows'
+                page.attrs['AXChildren'].append(duplicate)
+            if mode == 'hidden':
+                link.attrs['AXHidden'] = True
+            if mode == 'scan_limit':
+                page.attrs['AXChildren'].extend(Node(AXRole='AXGroup', AXParent=page) for _ in range(300))
+            ax.AXUIElementCopyActionNames = lambda node, _: (0, ['AXPress'] if node in page.attrs['AXChildren'] else [])
+
+            def press(node, action):
+                ax.effects.append(('press', node.attrs['AXTitle']))
+                if mode == 'button':
+                    node.attrs['AXExpanded'] = True
+                elif mode == 'focus_only':
+                    ax.application.attrs['AXFocusedUIElement'] = node
+                elif mode != 'ignored':
+                    ax.window.attrs['AXURL'] = 'https://example.com/wrong' if mode == 'wrong_destination' else destination
+                return 0
+
+            ax.AXUIElementPerformAction = press
+
+            class ClickJev(Jev):
+                def system_one(self, state, questions, **kwargs):
+                    question = questions.get('target_PRESS_CONTROL')
+                    target = next((key for key in question.criteria if key != 'none'), 'missing') if question else 'missing'
+                    self.plan = [('PRESS_CONTROL', target, 'none')]
+                    result = super().system_one(state, questions, **kwargs)
+                    if mode == 'destination_drift':
+                        link.attrs['AXURL'] = 'https://example.com/changed'
+                    if mode == 'page_drift':
+                        ax.window.attrs['AXURL'] = 'https://example.com/changed'
+                    return result
+
+            client = ClickJev(plan=[])
+            with patch('app.runtime.verify_action', side_effect=lambda *a, **kw: verify_action(*a, timeout_seconds=0, **kw)):
+                result = run_goal('click Downloads', desktop, client=client)
+            success = mode in {'link', 'button'}
+            self.assertEqual(result['outcome'] == 'completed', success, (mode, result))
+            dispatched = mode in {'link', 'button', 'ignored', 'wrong_destination', 'focus_only'}
+            self.assertEqual(len(ax.effects), int(dispatched), (mode, result))
+            self.assertNotIn(destination, json.dumps(client.calls))
+            if mode in {'duplicate', 'partial_duplicate', 'scan_limit'}:
+                self.assertIn('unique full', result['reason'])
+                self.assertEqual(client.calls, [])
+            web_cases[mode] = result
+        Path('.build/named-clicks-e2e.json').write_text(json.dumps(web_cases, indent=2))
+
     def test_generic_app_controls_use_the_same_observe_decide_loop(self):
         """Other accessible apps can create/focus/type, without a Notes-only runner."""
 

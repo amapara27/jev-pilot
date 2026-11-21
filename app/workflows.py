@@ -7,6 +7,7 @@ from time import monotonic
 from urllib.parse import unquote, urlparse
 
 from .text_input import TextInputError, native_true, COLLECTION_ROLES
+from .web_navigation import normalize_web_url
 
 
 NOTES = "com.apple.Notes"
@@ -54,7 +55,7 @@ class WorkflowTarget:
         """Build target facts; the outgoing request strips full Finder URLs."""
 
         return {"scope": "control" if self.kind == "control" else "finder_item", "bundle_identifier": self.bundle_id,
-                "process_identifier": self.pid, "label": self.label, "url": self.url,
+                "process_identifier": self.pid, "label": self.label, "url": self.url if self.kind == 'item' else None,
                 "selected": self.selected, "sole_selected": self.sole_selected, "ambiguous": self.ambiguous,
                 "role": self.role}
 
@@ -83,28 +84,40 @@ class NativeWorkflows:
             current = self.text.read(current, "AXParent")
         return False
 
-    def scan(self, pid, bundle, application, window):
+    def scan(self, pid, bundle, application, window, *, web_controls=False):
         """Discover exact English menu actions, search fields and visible URL-backed items."""
 
         text, ax = self.text, self.text.ax
         menu_error, menu = ax.AXUIElementCopyAttributeValue(application, 'AXMenuBar', None)
         self.diagnostics = {'menu_bar_ax_error': int(menu_error), 'query_field_checks': []}
-        queue = deque([menu, window] if bundle == FINDER else [window, menu])
+        queue = deque((node, False) for node in ([menu, window] if bundle == FINDER else [window, menu]))
         deferred = deque()
         visited, found, selected_notes = [], [], []
+        truncated = False
         deadline = monotonic() + 1
         text.scan_deadline = deadline
         while (queue or deferred) and len(visited) < 256 and monotonic() < deadline:
             if not queue:
                 queue, deferred = deferred, deque()
-            node = queue.popleft()
+            node, in_web = queue.popleft()
             if node is None or any(text.equal(node, old) for old in visited):
                 continue
             visited.append(node)
             if not text.safe_ancestry(node):
                 continue
             role = text.read(node, "AXRole")
+            in_web = in_web or role == 'AXWebArea'
+            if in_web and not (web_controls and bundle == 'com.apple.Safari'):
+                continue
+            if in_web and native_true(text.read(node, 'AXHidden')):
+                continue
             label = next((str(value) for value in (text.read(node, "AXTitle"), text.read(node, "AXDescription")) if isinstance(value, str) and value), "")[:240]
+            if in_web and role == 'AXLink' and not label:
+                # WebKit often puts a link's accessible name in one static-text child.
+                children = text.read(node, 'AXChildren') or ()
+                labels = [text.read(child, 'AXValue') for child in list(children)[:8]
+                          if text.safe_ancestry(child) and text.read(child, 'AXRole') == 'AXStaticText']
+                label = ' '.join(value for value in labels if isinstance(value, str))[:240]
             if role == 'AXMenuBarItem' and label.casefold() not in WORKFLOW_MENUS.get(bundle, ()):
                 continue
             enabled_error, enabled = ax.AXUIElementCopyAttributeValue(node, "AXEnabled", None)
@@ -115,14 +128,22 @@ class NativeWorkflows:
             if bundle == NOTES and role in {"AXTable", "AXOutline", "AXList"}:
                 rows = list(text.read(node, "AXSelectedRows") or ())[:32]
                 selected_notes.extend(rows)
-                queue.extendleft(rows[:max(0, 256 - len(queue))])
+                queue.extendleft((row, in_web) for row in rows[:max(0, 256 - len(queue))])
             if bundle == NOTES and role == "AXRow" and (native_true(text.read(node, "AXSelected")) or any(text.equal(node, row) for row in selected_notes)):
                 kind, label = "note_selection", "Selected note"
-            if available and press and role in {"AXMenuItem", "AXButton"}:
+            if available and press and role in {"AXMenuItem", "AXButton", "AXLink"}:
                 # Menu items are never generic controls: their labels carry history, bookmark and file
                 # titles, and a full menu tree floods Jev's request (152 TextEdit items).
                 if role == "AXButton" and label and not text.read(node, "AXURL") and not text.read(node, "AXFilename"):
                     kind = "control"
+                if in_web and role in {'AXLink', 'AXButton'} and label:
+                    raw_url = text.read(node, 'AXURL')
+                    raw_url = raw_url.absoluteString() if hasattr(raw_url, 'absoluteString') else raw_url
+                    url = normalize_web_url(raw_url) if raw_url else None
+                    if role == 'AXButton' and not raw_url or url:
+                        kind = 'control'
+                    else:
+                        kind = None
                 if bundle == NOTES and label.casefold() == "new note":
                     kind = "new_note"
                 elif bundle == FINDER and label.casefold() in {"find", "find…", "find...", "search"}:
@@ -160,7 +181,8 @@ class NativeWorkflows:
             children = text.read(node, "AXVisibleChildren") if role in COLLECTION_ROLES or role == "AXScrollArea" else None
             if children is None:
                 children = text.read(node, "AXChildren")
-            pending = list(children or ())[:max(0, 256 - len(queue) - len(deferred))]
+            truncated |= len(children or ()) > max(0, 256 - len(queue) - len(deferred))
+            pending = [(child, in_web) for child in list(children or ())[:max(0, 256 - len(queue) - len(deferred))]]
             if role in COLLECTION_ROLES:
                 deferred.extend(pending)
             else:
@@ -172,10 +194,12 @@ class NativeWorkflows:
             if key not in deduplicated or item.selected:
                 deduplicated[key] = item
         found = list(deduplicated.values())
-        counts = Counter(item.label.casefold() for item in found if item.kind == "item")
-        found = [replace(item, ambiguous=counts[item.label.casefold()] > 1) if item.kind == "item" else item for item in found]
+        counts = Counter((item.kind, item.label.casefold()) for item in found if item.kind in {'item', 'control'})
+        found = [replace(item, ambiguous=counts[(item.kind, item.label.casefold())] > 1
+                         or (web_controls and item.kind == 'control' and bool(queue or deferred or truncated)))
+                 if item.kind in {'item', 'control'} else item for item in found]
         self.previous = tuple(found)
-        self.diagnostics.update(visited_nodes=len(visited), scan_limit_reached=bool(queue or deferred),
+        self.diagnostics.update(visited_nodes=len(visited), scan_limit_reached=bool(queue or deferred or truncated),
                                 control_count=sum(item.kind in {'control', 'find', 'open', 'new_note'} for item in found),
                                 query_count=sum(item.kind == 'query' for item in found))
         return self.previous

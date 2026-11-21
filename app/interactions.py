@@ -25,7 +25,7 @@ MENU_LABELS = {
     'address_bar': {'open location', 'open location…', 'open location...'},
     'zoom_in': {'zoom in'}, 'zoom_out': {'zoom out'}, 'reset_zoom': {'actual size'},
 }
-TEXT_COMMANDS = {'select_all', 'copy', 'cut', 'paste', 'undo', 'redo', 'enter'}
+TEXT_COMMANDS = {'select_all', 'copy', 'cut', 'paste', 'undo', 'redo', 'enter', 'delete_last_word', 'new_paragraph'}
 BROWSER_COMMANDS = set(MENU_LABELS) - TEXT_COMMANDS - {'find'}
 WINDOW_COMMANDS = {'minimize': 'AXMinimized', 'maximize': 'AXFullScreen'}
 MENU_BRANCHES = {'file': {'new_tab', 'close_tab', 'address_bar'},
@@ -37,6 +37,8 @@ PATTERNS = [
     ('minimize', r'minimi[zs]e'), ('maximize', r'(?:maximi[zs]e|enter\s+full\s*screen)'),
     ('enter', r'(?:press|hit)\s+(?:the\s+)?(?:enter|return)(?:\s+key)?'),
     ('select_all', r'select\s+all(?:\s+text)?'),
+    ('delete_last_word', r'delete\s+(?:the\s+)?last\s+word'),
+    ('new_paragraph', r'new\s+paragraph'),
     ('reopen_tab', r'reopen\s+(?:the\s+)?(?:last\s+)?(?:closed\s+)?tab'),
     ('close_tab', r'close\s+(?:(?:this|the|current)\s+)?tab'),
     ('new_tab', r'(?:open\s+)?(?:a\s+)?new\s+tab'),
@@ -88,6 +90,19 @@ def command_actions(goal, *, with_positions=False):
 
 def action_operation(command):
     return 'SCROLL' if command.startswith('scroll_') else 'KEYBOARD_ACTION'
+
+
+def last_word_range(editor):
+    """Locate the word before a collapsed caret, preserving everything after it."""
+
+    if not editor.selection or editor.selection[1] or not editor.value:
+        return None
+    prefix = editor.value.encode('utf-16-le')[:editor.selection[0] * 2].decode('utf-16-le')
+    match = re.search(r'\S+\s*$', prefix)
+    if not match:
+        return None
+    start = utf16_length(prefix[:match.start()])
+    return start, editor.selection[0] - start
 
 
 @dataclass(frozen=True)
@@ -258,6 +273,11 @@ class NativeInteractions:
             if editor.value and text.settable(editor.element, 'AXSelectedTextRange'):
                 add('select_all', editor.element)
             add('enter', editor.element)
+            if editor.selected_text_writable:
+                if editor.role == 'AXTextArea' and len(editor.value) + 2 <= MAX_VALUE_CHARACTERS:
+                    add('new_paragraph', editor.element)
+                if text.settable(editor.element, 'AXSelectedTextRange') and last_word_range(editor):
+                    add('delete_last_word', editor.element)
         if not terminal:
             for command, items in menus.items():
                 if commands and command not in commands:
@@ -435,6 +455,23 @@ class NativeInteractions:
                 raise TextInputError('The enabled menu command failed; it was not retried.', effect_sent=True)
             return
         q, command = self.text.quartz, target.command
+        if command == 'new_paragraph':
+            self.text.insert(target.editor, '\n\n', guard)
+            return
+        if command == 'delete_last_word':
+            selection = last_word_range(target.editor)
+            value = self.text.ax.AXValueCreate(self.text.ax.kAXValueCFRangeType, selection)
+            if value is None or not guard():
+                raise TextInputError('The editor changed before word selection; no effect was sent.')
+            error = self.text.ax.AXUIElementSetAttributeValue(target.element, 'AXSelectedTextRange', value)
+            current = self.text.recheck(target.editor, self.text.application(target.pid), target.window)
+            expected = replace(target.editor, selection=selection)
+            if error or not current or not self.text.same_target(expected, current, typing=True) or not guard():
+                raise TextInputError('Word selection could not be verified; no text was deleted.', effect_sent=True)
+            error = self.text.ax.AXUIElementSetAttributeValue(target.element, 'AXSelectedText', '')
+            if error:
+                raise TextInputError('Word deletion was uncertain; it was not retried.', effect_sent=True)
+            return
         if command == 'select_all':
             value = self.text.ax.AXValueCreate(self.text.ax.kAXValueCFRangeType, (0, utf16_length(target.editor.value)))
             if value is None or not guard():
@@ -506,6 +543,11 @@ class NativeInteractions:
         original = target.editor
         current = next((item for item in state.text_fields if original and item.id == original.id), None)
         same = current and self.text.same_target(original, current, typing=False) and current.focused
+        if target.command in {'delete_last_word', 'new_paragraph'}:
+            selection = last_word_range(original) if target.command == 'delete_last_word' else original.selection
+            inserted = '' if target.command == 'delete_last_word' else '\n\n'
+            return bool(same and current.value == expected_insertion(original.value, selection, inserted)
+                        and current.selection == (selection[0] + utf16_length(inserted), 0))
         if target.command == 'select_all':
             return bool(same and current.value == original.value and current.selection == (0, utf16_length(original.value)))
         if target.command == 'enter' and original.role == 'AXTextArea':

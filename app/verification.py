@@ -111,6 +111,20 @@ def verify_action(desktop: object, action: ActionCandidate, before: object, time
                 details["reason"] = "control_effect_unobserved"
                 previous = next(item for item in before.workflow_targets if item.id == action.parameters["element_id"])
                 current = next((item for item in state.workflow_targets if item.id == previous.id), None)
+                application = desktop.text.application(previous.pid)
+                same_window = desktop.text.equal(desktop.text.read(application, 'AXFocusedWindow'), previous.window)
+                if previous.url:
+                    if same_window and state.browser_url != before.browser_url and web_url_matches(previous.url, state.browser_url):
+                        details['reason'] = 'link_destination_observed'
+                        return True
+                    # A link is verified by its destination, never unrelated editor changes.
+                    if monotonic() >= deadline:
+                        return False
+                    sleep(0.05)
+                    continue
+                if same_window and state.browser_url and state.browser_url != before.browser_url:
+                    details['reason'] = 'browser_navigation_observed'
+                    return True
                 if current and desktop.text.equal(previous.element, current.element) and desktop.text.equal(previous.window, current.window):
                     if current.selected != previous.selected or current.expanded != previous.expanded:
                         details["reason"] = "control_state_changed"

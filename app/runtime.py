@@ -84,6 +84,7 @@ def prepare_draft(goal, desktop, submit, *, model, client):
         return None
     created_at = monotonic()
     required = required_workflow_operations(goal)
+    desktop.named_click = 'PRESS_CONTROL' in required
     desktop.interaction_commands, ordered, _ = _goal_commands(goal, required)
     before = desktop.snapshot()
     if required - WEB_OPERATIONS and not before.ax_trusted:
@@ -123,6 +124,7 @@ def run_goal(
     pressed_controls = set()
     recoveries = 0
     required = required_workflow_operations(goal)
+    desktop.named_click = 'PRESS_CONTROL' in required
     workflow = bool(required - {"TYPE_TEXT"})
     limit = 8 if workflow else MAX_STEPS
     verified_operations = set()
@@ -426,6 +428,9 @@ def run_goal(
                 created_note = observations[-1]
             if action.kind == "PRESS_CONTROL":
                 pressed_controls.add(action.parameters["element_id"])
+                if required == {'PRESS_CONTROL'} and re.fullmatch(r'\s*(?:click|tap|press|choose)(?:\s+on)?\s+(?!.*\b(?:and|then)\b).+', goal, re.I):
+                    report.update(outcome='completed', completion_scope='single_control')
+                    return report
                 if diagnostics["reason"] == "editor_changed" and len(observations[-1].text_fields) == 1:
                     prepared_field = observations[-1].text_fields[0]
             verified_operations.add(action.kind)

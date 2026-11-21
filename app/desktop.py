@@ -138,7 +138,8 @@ class MacDesktop:
             if focused:
                 fields = self.text.scan(active.pid, active.bundle_id, application, window)
                 diagnostics.update(self.text.diagnostics)
-                workflow_targets = self.workflows.scan(active.pid, active.bundle_id, application, window)
+                workflow_targets = self.workflows.scan(active.pid, active.bundle_id, application, window,
+                                                      web_controls=getattr(self, 'named_click', False))
                 diagnostics.update(self.text.diagnostics)
                 diagnostics['workflow_discovery'] = dict(self.workflows.diagnostics)
                 resolved = file_identity(self.text.read(window, "AXDocument") or self.text.read(window, "AXURL"))
@@ -276,6 +277,19 @@ class MacDesktop:
         for item in state.workflow_targets:
             if item.kind in {"item", "control"}:
                 targets[item.id] = item.provider_target()
+        if getattr(self, 'named_click', False):
+            match = re.fullmatch(r'\s*(?:click|tap|press|choose)(?:\s+on)?\s+(?:the\s+)?(.+?)\s*[.!?]?\s*', goal, re.I)
+            if match and not re.search(r'\b(?:and|then)\b', match.group(1), re.I):
+                name = re.sub(r'\s+(?:button|link)$', '', match.group(1), flags=re.I).strip('"“”').casefold()
+                controls = [item for item in state.workflow_targets if item.kind == 'control']
+                exact = [item for item in controls if item.label.casefold() == name]
+                matches = exact or [item for item in controls if name and name in item.label.casefold()]
+                if len(matches) > 1 or any(item.ambiguous for item in matches):
+                    raise DesktopError('More than one matching control, or the page scan is incomplete. '
+                                       'Say a unique full button or link name; no click was sent.')
+                # Jev still selects the operation and target; a named click cannot press another control.
+                allowed = {item.id for item in matches}
+                targets = {key: value for key, value in targets.items() if value.get('scope') != 'control' or key in allowed}
         for item in state.interaction_targets:
             if item.command in getattr(self, 'interaction_commands', ()):
                 targets[item.id] = item.provider_target()
@@ -391,13 +405,15 @@ class MacDesktop:
                 raise DesktopError("The selected browser is no longer installed.")
             self.validated_state = fresh
         if action.kind in WORKFLOW_KINDS:
+            if action.kind == 'PRESS_CONTROL' and before.browser_url != fresh.browser_url:
+                raise DesktopError('The browser page changed before the click; no effect was sent.')
             identifiers = [action.parameters["element_id"]]
             if action.kind == "OPEN_ITEM":
                 identifiers.append(action.parameters["open_control_id"])
             for identifier in identifiers:
                 original = next((item for item in before.workflow_targets if item.id == identifier), None)
                 current = next((item for item in fresh.workflow_targets if item.id == identifier), None)
-                if not fresh.ax_trusted or not original or not current or not self.workflows.same_target(original, current):
+                if not fresh.ax_trusted or not original or not current or current.ambiguous or not self.workflows.same_target(original, current):
                     raise DesktopError("The app-specific control, file, selection or query changed; no effect was sent.")
             self.validated_state = fresh
         if action.kind in {"TYPE_TEXT", "FOCUS_FIELD"}:

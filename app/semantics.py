@@ -32,7 +32,7 @@ OPERATIONS = {
     "OPEN_ITEM": "Open an already selected, uniquely named Finder item through its observed Open menu; no payload.",
     "RUN_COMMAND": "Explicitly submit a command in Terminal, distinct from typing. Not executable yet.",
     "STOP": "No action advances the request or it is already complete; target and payload must be none.",
-    "UNSUPPORTED": "The requested operation is outside this menu, such as clicking; target and payload must be none.",
+    "UNSUPPORTED": "The requested operation has no supported grounded target in this menu; target and payload must be none.",
 }
 MAX_GOAL_CHARACTERS = 8192
 MAX_PAYLOAD_SPANS = 16
@@ -92,7 +92,7 @@ class SemanticMenu:
         elif operation == "CREATE_NOTE":
             valid = target_id == "com.apple.Notes"
         elif operation == "PRESS_CONTROL":
-            valid = target.get("scope") == "control"
+            valid = target.get("scope") == "control" and not target.get('ambiguous')
         elif operation == "PREPARE_SEARCH":
             valid = target_id == "com.apple.finder"
         elif operation == "SEARCH":
@@ -304,7 +304,7 @@ def required_workflow_operations(goal: str) -> set[str]:
         required.add("OPEN_WEBSITE")
     if re.search(r"\b(?:(?:create|make|start)\s+(?:a\s+)?(?:new\s+)?note|open\s+(?:a\s+)?new\s+note)\b", command):
         required.add("CREATE_NOTE")
-    if re.search(r"\b(?:click|press|choose)\b|\b(?:create|make|open)\s+(?:a\s+)?new\s+(?:document|window|tab)\b", command):
+    if re.search(r"\b(?:click|tap|press|choose)\b|\b(?:create|make|open)\s+(?:a\s+)?new\s+(?:document|window|tab)\b", command):
         required.add("PRESS_CONTROL")
     if not web_search and re.search(r"\b(?:search|find|locate)\b", command):
         required.add("SEARCH")

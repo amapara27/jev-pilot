@@ -24,6 +24,7 @@ from .config import user_data_directory
 from .desktop import MacDesktop
 from .runtime import prepare_draft, run_goal
 from .safety import requires_confirmation
+from .voice_status import VoiceStatus
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -42,6 +43,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--draft", action=argparse.BooleanOptionalAction, default=False,
                         help="With --listen, try a draft Jev decision during a pause.")
     parser.add_argument("--push-to-talk", action="store_true", help="Hold Right Option to speak, then release it to finish the utterance.")
+    parser.add_argument('--status', action=argparse.BooleanOptionalAction, default=True,
+                        help='Show a floating voice transcript/status panel (use --no-status for Terminal only).')
     parser.add_argument("--silence-ms", type=int, default=650, help="Quiet audio needed to commit an utterance (default: 650 ms).")
     parser.add_argument("--speech-threshold", type=float, default=0.012, help="RMS threshold for detecting speech (default: 0.012).")
     parser.add_argument("--report", type=Path, default=user_data_directory() / "Reports" / "python-cli-last.json",
@@ -72,6 +75,7 @@ def _confirm_action(desktop, prompt, *, cancel_event=None):
     else:
         print(prompt, end='', flush=True)
         while not cancel_event.is_set():
+            NSRunLoop.currentRunLoop().runUntilDate_(NSDate.date())
             if select.select([sys.stdin], [], [], 0.05)[0]:
                 answer = sys.stdin.readline()
                 break
@@ -95,7 +99,17 @@ def _confirm_action(desktop, prompt, *, cancel_event=None):
     return False
 
 
-def _run_voice(
+def _run_voice(args, **kwargs):
+    """Own the panel for the whole session, including setup errors and interruptions."""
+
+    status = VoiceStatus(enabled=args.status and kwargs.get('audio_source_factory') is None)
+    try:
+        return _voice_session(args, status=status, **kwargs)
+    finally:
+        status.close()
+
+
+def _voice_session(
     args: argparse.Namespace,
     *,
     desktop: object | None,
@@ -105,6 +119,7 @@ def _run_voice(
     audio_source_factory: object | None,
     key_source_factory=None,
     approve_action=None,
+    status,
 ) -> int:
     """Run local ASR continuously and hand committed transcripts to one FIFO worker."""
 
@@ -211,6 +226,7 @@ def _run_voice(
     def on_partial(text: str) -> None:
         """Show hypotheses and optionally queue a stable app clause."""
 
+        status.update('listening', text)
         if not approval_wait.is_set():
             print(f"\rPartial: {text}", end="", file=output, flush=True)
         if stream is not None:
@@ -220,6 +236,7 @@ def _run_voice(
         """Queue final text or its unconsumed suffix, rejecting overload explicitly."""
 
         transcripts.append(text)
+        status.update('completed' if args.transcribe_only else 'processing', text)
         print(f"\nTranscript: {text}", file=output, flush=True)
         if not args.transcribe_only and stop_phrase(text):
             stopping.set()
@@ -241,6 +258,7 @@ def _run_voice(
                 on_partial=on_partial,
                 on_pause=on_pause if draft_pool is not None else None,
                 on_boundary=on_boundary,
+                on_state=status.update,
                 stop_event=stopping,
                 eou_silence_ms=args.silence_ms,
                 speech_threshold=args.speech_threshold,
@@ -263,11 +281,14 @@ def _run_voice(
         if not sys.stdin.isatty():
             return False
         approval_wait.set()
+        status.update('approval', action.description + ' Enter y or n in Terminal.')
+        status.pump()
         print(f"Confirm spoken action: {action.description} [y/N] ", end="", file=output, flush=True)
         try:
             return _confirm_action(target_desktop, '', cancel_event=stopping)
         finally:
             approval_wait.clear()
+            status.update('working', action.description)
 
     def execute(item) -> None:
         """Run one queued transcript synchronously on the main/AppKit thread."""
@@ -282,6 +303,8 @@ def _run_voice(
         if stopping.is_set():
             pending.append(goal)
             return
+        status.update('working', goal)
+        status.pump()
         result = run_goal(
             goal,
             target_desktop,
@@ -302,6 +325,9 @@ def _run_voice(
             draft_hits += result["draft"]["status"] == "hit"
         entry = {"transcript": goal, "source": "stable_prefix" if prefix else "final", **result}
         runs.append(entry)
+        status.update('completed' if result['outcome'] in {'completed', 'dry_run'} else 'failed',
+                      goal if result['outcome'] in {'completed', 'dry_run'} else str(result.get('reason', result['outcome'])))
+        status.pump()
         print(json.dumps(entry, indent=2, sort_keys=True), file=output, flush=True)
         if result["outcome"] not in {"completed", "dry_run"}:
             worker_error.append(str(result.get("reason", result["outcome"])))
@@ -336,27 +362,29 @@ def _run_voice(
         return result
 
     error = None
+    status.update('ready', 'Hold Right Option to speak' if args.push_to_talk else 'Say a command')
+    status.pump()
     if args.transcribe_only:
+        capture_thread = Thread(target=capture, name='nemotron-transcribe', daemon=True)
+        capture_thread.start()
         try:
-            source_kwargs = {"eou_silence_ms": args.silence_ms, "speech_threshold": args.speech_threshold,
-                             "key_source_factory": key_source_factory}
-            if audio_source_factory is not None:
-                source_kwargs["audio_source_factory"] = audio_source_factory
-            utterance_count[0] = run_live_asr(
-                model, on_final, on_partial=on_partial, stop_event=stopping, **source_kwargs
-            )
+            while not capture_done.wait(0.05):
+                status.pump()
         except KeyboardInterrupt:
             stopping.set()
             print("\nListening stopped; unfinished speech was discarded.", file=output)
-        except Exception as caught:
+        finally:
             stopping.set()
-            error = str(caught) or f"Voice runtime failed ({type(caught).__name__})."
+            capture_thread.join()
+        if capture_error:
+            error = capture_error[-1]
             print(f"\nVoice error: {error}", file=output)
     else:
         capture_thread = Thread(target=capture, name="nemotron-streaming-asr", daemon=True)
         capture_thread.start()
         try:
             while not stopping.is_set() and (not capture_done.is_set() or not committed.empty()):
+                status.pump()
                 try:
                     goal = committed.get(timeout=0.05)
                 except queue.Empty:

@@ -36,7 +36,10 @@ from app.text_input import TextInputError
 ROOT = Path(__file__).resolve().parents[1]
 # The page reports its own load, scroll and viewport facts, so web checks never rely on Jev Pilot's observations.
 PAGE = """<!doctype html><title>Jev matrix {path}</title>
-<body style="margin:0;height:{height}px;background:linear-gradient(#fff,#ccd)"><h1>{path}</h1><script>
+<body style="margin:0;height:{height}px;background:linear-gradient(#fff,#ccd)"><h1>{path}</h1>
+<a href="/clicked">Matrix Downloads</a>
+<a href="/duplicate-a">Matrix Duplicate</a><a href="/duplicate-b">Matrix Duplicate</a>
+<button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');send('button')">Matrix Details</button><script>
 const id = Math.random().toString(36).slice(2);
 const send = kind => fetch(`/beacon?kind=${{kind}}&page={path}&load=${{id}}&y=${{Math.round(scrollY)}}`
   + `&max=${{document.documentElement.scrollHeight - innerHeight}}&w=${{innerWidth}}&dpr=${{devicePixelRatio}}`);
@@ -51,13 +54,13 @@ FINDER_CLOSE = """tell application "Finder"
     end repeat
 end tell"""
 
-def osa(script: str) -> str:
+def osa(script: str, *, preserve_whitespace=False) -> str:
     """Run AppleScript for fixture setup and oracle reads; never for the command under test."""
 
     result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=15)
     if result.returncode:
         raise RuntimeError(f"AppleScript failed: {result.stderr.strip()}")
-    return result.stdout.strip()
+    return result.stdout.removesuffix('\n') if preserve_whitespace else result.stdout.strip()
 
 
 def keys(stroke: str) -> None:
@@ -181,7 +184,7 @@ class Fixtures:
                    f'return name of front document is {json.dumps(self.document.name)}\nend tell')
         if not wait_for(lambda: (osa(focused) == "true", None))[0]:
             raise RuntimeError("The disposable TextEdit document did not gain focus.")
-        osa(f'tell application "TextEdit" to set text of document "{self.document.name}" to {json.dumps(text)}')
+        osa(f'tell application "TextEdit" to set text of document "{self.document.name}" to {json.dumps(text, ensure_ascii=False)}')
         sleep(0.3)
         if select_all:
             keys('keystroke "a" using command down')
@@ -195,7 +198,7 @@ class Fixtures:
                 raise RuntimeError(f"The TextEdit fixture selection was {observed}, expected {expected}; {self.selection_diagnostics}")
 
     def text(self) -> str | None:
-        return osa(f'tell application "TextEdit" to get text of document "{self.document.name}"')
+        return osa(f'tell application "TextEdit" to get text of document "{self.document.name}"', preserve_whitespace=True)
 
     def selected_text(self) -> str | None:
         return next((ax(node, "AXSelectedText") for node in ax_nodes("com.apple.TextEdit")
@@ -204,11 +207,10 @@ class Fixtures:
     def selection(self):
         """Read the fixture's native selection range independently of Jev Pilot."""
 
-        apps = NSRunningApplication.runningApplicationsWithBundleIdentifier_("com.apple.TextEdit")
-        self.selection_diagnostics = {}
-        if not apps:
-            return None
-        application = AX.AXUIElementCreateApplication(apps[0].processIdentifier())
+        # Resolve the live PID independently: AppKit's cached running-app list can be empty after dispatch.
+        pid = int(osa('tell application "System Events" to get unix id of process "TextEdit"'))
+        self.selection_diagnostics = {'pid': pid}
+        application = AX.AXUIElementCreateApplication(pid)
         AX.AXUIElementSetMessagingTimeout(application, 0.5)
         role_error, _ = AX.AXUIElementCopyAttributeValue(application, "AXRole", None)
         error, node = AX.AXUIElementCopyAttributeValue(application, "AXFocusedUIElement", None)
@@ -385,6 +387,7 @@ class Case:
     setup: Callable[[Fixtures], object]
     check: Callable[[Fixtures, object], tuple[bool, object]]
     drift_at: str | None = None
+    refused: bool = False
 
 
 SAMPLE = "Jev matrix sample text"
@@ -409,7 +412,40 @@ def cases() -> list[Case]:
         detail = {"text": fixtures.text(), "selection": fixtures.selection()}
         return detail == {"text": SAMPLE, "selection": (len(SAMPLE) - 1, 0)}, detail
 
+    def click_baseline(fixtures):
+        fixtures.safari()
+        # A fresh page makes every button and navigation oracle start unsatisfied.
+        fixtures.navigate('/click-' + str(monotonic()).replace('.', '-'))
+        return fixtures.safari_tab()['url']
+
+    def click_check(fixtures, baseline, kind):
+        current = fixtures.safari_tab()
+        page = urlparse(baseline).path
+        event = fixtures.web.latest(page, 'button')
+        if kind == 'button':
+            return event is not None and current['url'] == baseline, event
+        if kind == 'refused':
+            return current['url'] == baseline and event is None, current
+        return current['url'] == fixtures.web.base + '/clicked' and fixtures.web.loads('/clicked') > 0, current
+
+    def check_deletion(fixtures, _):
+        value, selection = fixtures.text(), fixtures.selection()
+        return (value == 'hello 🌍 ' and selection == (9, 0),
+                {'text': value, 'selection': selection, 'selection_diagnostics': fixtures.selection_diagnostics})
+
     return [
+        Case('delete_last_word', 'delete the last word', 'v0.3', 'delete_last_word',
+             lambda f: f.textedit('hello 🌍 café!   '),
+             check_deletion),
+        Case('new_paragraph', 'new paragraph', 'v0.3', 'new_paragraph',
+             lambda f: f.textedit(SAMPLE),
+             lambda f, _: same((f.text(), f.selection()), (SAMPLE + '\n\n', (len(SAMPLE) + 2, 0)))),
+        Case('named_link', 'click Matrix Downloads', 'v0.3', None, click_baseline,
+             lambda f, baseline: click_check(f, baseline, 'link')),
+        Case('named_button', 'click Matrix Details', 'v0.3', None, click_baseline,
+             lambda f, baseline: click_check(f, baseline, 'button')),
+        Case('ambiguous_click', 'click Matrix Duplicate', 'v0.3', None, click_baseline,
+             lambda f, baseline: click_check(f, baseline, 'refused'), refused=True),
         # v0.1 regressions
         Case("type_text", 'type "matrix typed"', "v0.1", None,
              lambda f: f.textedit(SAMPLE), lambda f, _: same(f.text(), SAMPLE + "matrix typed")),
@@ -536,6 +572,9 @@ class RecordingDesktop(MacDesktop):
 def stage(case: Case, offered: set[str], report: dict, oracle: bool, *, drift_applied=False) -> str:
     """Name the first failing stage: discovery → selection → blocked → dispatch → verification."""
 
+    if case.refused:
+        return 'pass' if (oracle and not report.get('effect_sent') and not report.get('verified')
+                          and 'unique full' in report.get('reason', '')) else 'unsafe_or_unproven_refusal'
     if case.drift_at:
         if report.get("effect_sent") or report.get("verified"):
             return "unsafe_dispatch"
@@ -579,8 +618,9 @@ def speak(goal: str, directory: Path, model) -> tuple[str, dict]:
 class LivePlayback:
     """Replay synthesized audio at microphone pace and optionally simulate the talk key."""
 
-    def __init__(self, audio):
+    def __init__(self, audio, *, trim_silence=True):
         self.audio = audio
+        self.trim_silence = trim_silence
         self.thread = None
         self.on_key = None
         self.done = False
@@ -597,7 +637,7 @@ class LivePlayback:
         if not speech.size:
             raise RuntimeError("The synthesized utterance contained no audible speech.")
         self.rate, self.on_audio = rate, on_audio
-        self.samples = samples[:speech[-1] + 1]
+        self.samples = samples[:speech[-1] + 1] if self.trim_silence else samples
         return self
 
     def keys(self, on_key):
@@ -782,7 +822,7 @@ def main(argv=None) -> int:
         print(f"v0.1 regressions: {', '.join(regressions)}")
     if latency_regressions:
         print(f"Latency regressions: {', '.join(latency_regressions)}")
-    return 1 if regressions or latency_regressions else 0
+    return 1 if regressions or latency_regressions or any(row['scope'] == 'v0.3' and row['stage'] != 'pass' for row in rows) else 0
 
 
 if __name__ == "__main__":

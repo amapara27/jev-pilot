@@ -11,7 +11,7 @@ from pathlib import Path
 
 from app.cli import _save_report
 from app.speech_model import DEFAULT_MODEL, load_speech_model
-from app.speech_runtime import transcribe_audio_file
+from app.speech_runtime import run_live_asr, transcribe_audio_file
 
 
 def normalize_words(text: str) -> list[str]:
@@ -69,7 +69,19 @@ def main() -> int:
         return 2
 
     model = load_speech_model()
-    transcript = transcribe_audio_file(model, str(audio_path))
+    mode = os.environ.get('JEV_STT_MODE', 'file')
+    if mode not in {'file', 'live', 'push_to_talk'}:
+        print('JEV_STT_MODE must be file, live, or push_to_talk.', file=sys.stderr)
+        return 2
+    if mode == 'file':
+        transcript = transcribe_audio_file(model, str(audio_path))
+    else:
+        from scripts.native_matrix import LivePlayback
+        playback = LivePlayback(audio_path, trim_silence=False)
+        transcripts = []
+        run_live_asr(model, transcripts.append, audio_source_factory=playback.microphone,
+                     key_source_factory=playback.keys if mode == 'push_to_talk' else None)
+        transcript = ' '.join(transcripts)
     score = word_error(expected, transcript)
     threshold = float(os.environ.get("JEV_STT_MAX_WER", "0.20"))
     report = {

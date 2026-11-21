@@ -20,6 +20,8 @@ COMMITTING_LABEL = re.compile(r"\b(?:send|submit|pay|order|checkout|check\s+out|
 def blocked_goal(goal: str) -> bool:
     """Keep credential, purchase, and destructive requests away from the provider."""
 
+    if re.fullmatch(r'\s*delete\s+(?:the\s+)?last\s+word[.!?]?\s*', goal, re.I):
+        return False
     return bool(
         re.search(
             r"\b(password|passcode|credit card|payment|purchase|buy|delete|erase|trash)\b",
